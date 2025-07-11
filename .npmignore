@@ -1,0 +1,10 @@
+src
+test
+example
+.env*
+.git*
+tsconfig.json
+vitest.config.ts
+*.log
+coverage
+.nyc_output
