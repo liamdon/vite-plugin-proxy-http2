@@ -7,3 +7,6 @@ dist
 coverage
 .nyc_output
 *.tsbuildinfo
+
+# Demo certificates
+demo/certs/

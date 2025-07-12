@@ -1,6 +1,7 @@
 {
   "name": "vite-plugin-proxy-http2",
   "version": "0.1.0",
+  "type": "module",
   "description": "Vite plugin for HTTP/2 proxy support with proper protocol handling",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -9,15 +10,21 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
-    "dev": "tsup --watch",
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "dev:demo": "vite --config demo/vite.config.ts",
     "test": "vitest",
     "test:run": "vitest run",
     "prepublishOnly": "npm run build && npm run test:run",
     "typecheck": "tsc --noEmit",
     "verify": "./scripts/verify-publish.sh"
   },
-  "keywords": ["vite", "vite-plugin", "http2", "proxy"],
+  "keywords": [
+    "vite",
+    "vite-plugin",
+    "http2",
+    "proxy"
+  ],
   "author": "Liam Don <liamdon@gmail.com>",
   "license": "MIT",
   "repository": {
@@ -35,9 +42,9 @@
   "devDependencies": {
     "@types/node": "^24.0.13",
     "node-fetch": "^3.3.2",
-    "tsup": "^8.0.0",
     "typescript": "^5.8.3",
     "vite": "7.0.4",
+    "vite-plugin-dts": "^4.5.4",
     "vitest": "^3.2.4"
   },
   "peerDependencies": {
