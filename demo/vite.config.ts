@@ -1,9 +1,9 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import net from "node:net";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
-import { resolve, join, dirname } from "path";
-import { spawn } from "child_process";
-import net from "net";
-import { existsSync } from "fs";
-import { fileURLToPath } from "url";
 import http2ProxyPlugin from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -164,7 +164,7 @@ export default defineConfig({
         rewrite: (path) => path, // Keep the path as-is
         configure: (proxy, options) => {
           // Additional logging for demo purposes
-          proxy.on("proxyReq", (proxyReq, req) => {
+          proxy.on("proxyReq", (_proxyReq, req) => {
             console.log(
               `[Proxy] ${req.method} ${req.url} -> ${options.target}${req.url}`,
             );

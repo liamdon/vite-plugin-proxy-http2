@@ -1,19 +1,23 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createServer } from "vite";
-import type { ViteDevServer } from "vite";
-import http2ProxyPlugin from "../src/http2-proxy-enhanced";
-import { createSecureServer as createHttp2Server } from "http2";
-import { readFileSync } from "fs";
-import { join } from "path";
+import { readFileSync } from "node:fs";
+import type {
+  Http2SecureServer,
+  IncomingHttpHeaders,
+  ServerHttp2Stream,
+} from "node:http2";
+import { createSecureServer as createHttp2Server } from "node:http2";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import fetch from "node-fetch";
-import { fileURLToPath } from "url";
-import { dirname } from "path";
+import type { ViteDevServer } from "vite";
+import { createServer } from "vite";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import http2ProxyPlugin from "../src/http2-proxy-enhanced";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 describe("HTTP/2 Proxy Plugin", () => {
   let viteServer: ViteDevServer;
-  let targetServer: any;
+  let targetServer: Http2SecureServer;
   const targetPort = 9876;
   const vitePort = 9877;
 
@@ -24,48 +28,51 @@ describe("HTTP/2 Proxy Plugin", () => {
       cert: readFileSync(join(__dirname, "fixtures", "cert.pem")),
     });
 
-    targetServer.on("stream", (stream: any, headers: any) => {
-      const path = headers[":path"];
+    targetServer.on(
+      "stream",
+      (stream: ServerHttp2Stream, headers: IncomingHttpHeaders) => {
+        const path = headers[":path"];
 
-      if (path === "/api/test") {
-        stream.respond({
-          ":status": 200,
-          "content-type": "application/json",
-          "set-cookie": ["test=value; Domain=example.com; Path=/api"],
-        });
-        stream.end(JSON.stringify({ message: "Hello from HTTP/2" }));
-      } else if (path === "/api/redirect") {
-        stream.respond({
-          ":status": 302,
-          location: "/api/redirected",
-        });
-        stream.end();
-      } else if (path === "/router/api/test") {
-        // Handle router test
-        stream.respond({
-          ":status": 200,
-          "content-type": "application/json",
-        });
-        stream.end(JSON.stringify({ message: "Hello from HTTP/2" }));
-      } else if (path === "/api/error") {
-        stream.respond({ ":status": 500 });
-        stream.end("Internal Server Error");
-      } else if (path === "/sse") {
-        stream.respond({
-          ":status": 200,
-          "content-type": "text/event-stream",
-          "cache-control": "no-cache",
-        });
-        stream.write("data: First message\\n\\n");
-        setTimeout(() => {
-          stream.write("data: Second message\\n\\n");
+        if (path === "/api/test") {
+          stream.respond({
+            ":status": 200,
+            "content-type": "application/json",
+            "set-cookie": ["test=value; Domain=example.com; Path=/api"],
+          });
+          stream.end(JSON.stringify({ message: "Hello from HTTP/2" }));
+        } else if (path === "/api/redirect") {
+          stream.respond({
+            ":status": 302,
+            location: "/api/redirected",
+          });
           stream.end();
-        }, 100);
-      } else {
-        stream.respond({ ":status": 404 });
-        stream.end("Not Found");
-      }
-    });
+        } else if (path === "/router/api/test") {
+          // Handle router test
+          stream.respond({
+            ":status": 200,
+            "content-type": "application/json",
+          });
+          stream.end(JSON.stringify({ message: "Hello from HTTP/2" }));
+        } else if (path === "/api/error") {
+          stream.respond({ ":status": 500 });
+          stream.end("Internal Server Error");
+        } else if (path === "/sse") {
+          stream.respond({
+            ":status": 200,
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+          });
+          stream.write("data: First message\\n\\n");
+          setTimeout(() => {
+            stream.write("data: Second message\\n\\n");
+            stream.end();
+          }, 100);
+        } else {
+          stream.respond({ ":status": 404 });
+          stream.end("Not Found");
+        }
+      },
+    );
 
     await new Promise<void>((resolve) => {
       targetServer.listen(targetPort, resolve);
@@ -212,7 +219,7 @@ describe("HTTP/2 Proxy Plugin", () => {
 
 describe("HTTP/2 Connection Pool", () => {
   let viteServer: ViteDevServer;
-  let targetServer: any;
+  let targetServer: Http2SecureServer;
   const targetPort = 9878;
   const vitePort = 9879;
 
@@ -223,17 +230,20 @@ describe("HTTP/2 Connection Pool", () => {
       cert: readFileSync(join(__dirname, "fixtures", "cert.pem")),
     });
 
-    targetServer.on("stream", (stream: any, headers: any) => {
-      const path = headers[":path"];
+    targetServer.on(
+      "stream",
+      (stream: ServerHttp2Stream, headers: IncomingHttpHeaders) => {
+        const path = headers[":path"];
 
-      if (path === "/api/test") {
-        stream.respond({
-          ":status": 200,
-          "content-type": "application/json",
-        });
-        stream.end(JSON.stringify({ message: "Hello from HTTP/2" }));
-      }
-    });
+        if (path === "/api/test") {
+          stream.respond({
+            ":status": 200,
+            "content-type": "application/json",
+          });
+          stream.end(JSON.stringify({ message: "Hello from HTTP/2" }));
+        }
+      },
+    );
 
     await new Promise<void>((resolve) => {
       targetServer.listen(targetPort, resolve);

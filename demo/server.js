@@ -1,7 +1,7 @@
 // Simple HTTP/2 server for testing proxy functionality
-import http2 from "node:http2";
-import https from "node:https";
+
 import fs from "node:fs";
+import http2 from "node:http2";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -88,7 +88,7 @@ server.on("stream", (stream, headers) => {
 server.on("error", (err) => console.error("[HTTP/2 Server] Error:", err));
 
 // Also handle HTTP/1.1 requests for compatibility
-server.on("request", (req, res) => {
+server.on("request", (req, _res) => {
   // This handles HTTP/1.1 fallback
   console.log(`[HTTP/1.1 Fallback] ${req.method} ${req.url}`);
 });

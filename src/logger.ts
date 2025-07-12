@@ -1,11 +1,11 @@
-import { debuglog } from "util";
+import { debuglog } from "node:util";
 import type { ResolvedConfig } from "vite";
 
 export interface Logger {
-  debug: (msg: string, ...args: any[]) => void;
-  info: (msg: string, ...args: any[]) => void;
-  warn: (msg: string, ...args: any[]) => void;
-  error: (msg: string, ...args: any[]) => void;
+  debug: (msg: string, ...args: unknown[]) => void;
+  info: (msg: string, ...args: unknown[]) => void;
+  warn: (msg: string, ...args: unknown[]) => void;
+  error: (msg: string, ...args: unknown[]) => void;
 }
 
 export function createLogger(
@@ -16,7 +16,7 @@ export function createLogger(
   const viteLogger = viteConfig?.logger;
 
   return {
-    debug: (msg: string, ...args: any[]) => {
+    debug: (msg: string, ...args: unknown[]) => {
       if (
         process.env.DEBUG?.includes(namespace) ||
         process.env.LOG_LEVEL === "debug"
@@ -24,25 +24,27 @@ export function createLogger(
         debug(msg, ...args);
       }
     },
-    info: (msg: string, ...args: any[]) => {
+    info: (msg: string, ...args: unknown[]) => {
       if (viteLogger) {
         viteLogger.info(`[${namespace}] ${msg}`, { timestamp: true });
       } else {
         console.info(`[${namespace}] ${msg}`, ...args);
       }
     },
-    warn: (msg: string, ...args: any[]) => {
+    warn: (msg: string, ...args: unknown[]) => {
       if (viteLogger) {
         viteLogger.warn(`[${namespace}] ${msg}`, { timestamp: true });
       } else {
         console.warn(`[${namespace}] ${msg}`, ...args);
       }
     },
-    error: (msg: string, ...args: any[]) => {
+    error: (msg: string, ...args: unknown[]) => {
       if (viteLogger) {
+        // Type guard to check if first arg is an Error
+        const error = args[0] instanceof Error ? args[0] : undefined;
         viteLogger.error(`[${namespace}] ${msg}`, {
           timestamp: true,
-          error: args[0],
+          error,
         });
       } else {
         console.error(`[${namespace}] ${msg}`, ...args);

@@ -16,6 +16,8 @@
     "test": "vitest",
     "test:run": "vitest run",
     "format": "pnpm exec biome format --write",
+    "lint": "pnpm exec biome check",
+    "lint:fix": "pnpm exec biome check --write",
     "prepublishOnly": "npm run build && npm run test:run",
     "typecheck": "tsc --noEmit",
     "verify": "./scripts/verify-publish.sh"

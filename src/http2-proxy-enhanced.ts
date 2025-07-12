@@ -1,14 +1,16 @@
-import type { Plugin, ProxyOptions, ResolvedConfig } from "vite";
-import type { IncomingMessage, ServerResponse } from "http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
   ClientHttp2Session,
-  OutgoingHttpHeaders,
+  ClientHttp2Stream,
   IncomingHttpHeaders,
-} from "http2";
-import { connect, constants } from "http2";
-import * as net from "net";
-import * as tls from "tls";
-import { createLogger, logProxyRequest, type Logger } from "./logger";
+  OutgoingHttpHeaders,
+} from "node:http2";
+import { connect, constants } from "node:http2";
+import * as net from "node:net";
+import type { TLSSocket } from "node:tls";
+import * as tls from "node:tls";
+import type { Plugin, ProxyOptions, ResolvedConfig } from "vite";
+import { createLogger, type Logger, logProxyRequest } from "./logger";
 
 let logger: Logger;
 
@@ -21,8 +23,17 @@ const {
   HTTP2_HEADER_LOCATION,
 } = constants;
 
+// Type guard to check if a socket is a TLSSocket
+function isTLSSocket(socket: net.Socket | undefined): socket is TLSSocket {
+  return (
+    socket !== undefined &&
+    "encrypted" in socket &&
+    (socket as TLSSocket).encrypted === true
+  );
+}
+
 // Extended proxy options to match Vite's full feature set
-interface Http2ProxyOptions extends ProxyOptions {
+interface Http2ProxyOptions extends Omit<ProxyOptions, "configure" | "bypass"> {
   // Cookie rewriting
   cookieDomainRewrite?: string | { [domain: string]: string } | false;
   cookiePathRewrite?: string | { [path: string]: string } | false;
@@ -42,6 +53,17 @@ interface Http2ProxyOptions extends ProxyOptions {
   // Timeouts
   timeout?: number;
   proxyTimeout?: number;
+
+  // Override configure with HTTP/2 stream type
+  configure?: (stream: ClientHttp2Stream, options: Http2ProxyOptions) => void;
+
+  // Override bypass with our options type
+  bypass?: (
+    req: IncomingMessage,
+    res: ServerResponse,
+    options: Http2ProxyOptions,
+    // biome-ignore lint/suspicious/noConfusingVoidType: Matching Vite's bypass API which includes void
+  ) => null | undefined | false | string | void;
 
   // Response handling
   selfHandleResponse?: boolean;
@@ -79,7 +101,7 @@ class Http2ConnectionPool {
     }
 
     // Connection options
-    const connectOptions: any = {
+    const connectOptions: tls.ConnectionOptions & { auth?: string } = {
       rejectUnauthorized: options.secure !== false,
     };
 
@@ -152,7 +174,7 @@ class Http2ConnectionPool {
 const connectionPool = new Http2ConnectionPool();
 
 function normalizeProxyOptions(
-  options: string | Http2ProxyOptions,
+  options: string | Http2ProxyOptions | ProxyOptions,
 ): NormalizedProxyOptions {
   if (typeof options === "string") {
     return {
@@ -175,18 +197,37 @@ function normalizeProxyOptions(
   } else if ("protocol" in options.target && "host" in options.target) {
     // ProxyTargetDetailed type
     const { protocol, host, port } = options.target;
-    targetUrl = `${protocol}//${host}${port ? ":" + port : ""}`;
+    targetUrl = `${protocol}//${host}${port ? `:${port}` : ""}`;
   } else {
     throw new Error("Invalid proxy target");
   }
 
-  return {
+  // Create base normalized options
+  const baseOptions = {
     changeOrigin: true,
     xfwd: true,
     secure: true,
-    ...options,
     target: targetUrl,
-  } as NormalizedProxyOptions;
+  };
+
+  // Handle ProxyOptions that need to be converted to Http2ProxyOptions
+  const { configure, bypass, target: _, ...restOptions } = options;
+
+  const normalizedOptions: NormalizedProxyOptions = {
+    ...baseOptions,
+    ...restOptions,
+  };
+
+  // Add configure and bypass with proper typing if they exist
+  if (configure) {
+    normalizedOptions.configure = configure as Http2ProxyOptions["configure"];
+  }
+
+  if (bypass) {
+    normalizedOptions.bypass = bypass as Http2ProxyOptions["bypass"];
+  }
+
+  return normalizedOptions;
 }
 
 function rewriteCookie(
@@ -281,7 +322,7 @@ function createHttp2Headers(
 
   // Set host header if changeOrigin is true
   if (options.changeOrigin) {
-    headers["host"] = target.host;
+    headers.host = target.host;
   }
 
   // Add custom headers
@@ -291,13 +332,12 @@ function createHttp2Headers(
 
   // Add X-Forwarded headers if xfwd is true
   if (options.xfwd) {
-    const forwarded = req.connection.remoteAddress || req.socket.remoteAddress;
+    const forwarded = req.socket.remoteAddress;
     headers["x-forwarded-for"] = forwarded;
-    headers["x-forwarded-proto"] = (req.connection as any).encrypted
-      ? "https"
-      : "http";
+    // Check if socket is a TLSSocket (encrypted connection)
+    headers["x-forwarded-proto"] = isTLSSocket(req.socket) ? "https" : "http";
     headers["x-forwarded-host"] = req.headers.host || "";
-    headers["x-forwarded-port"] = String(req.connection.localPort);
+    headers["x-forwarded-port"] = String(req.socket.localPort);
   }
 
   return headers;
@@ -363,7 +403,12 @@ async function proxyHttp2Request(
 
   // Get target URL (may be dynamic via router)
   const targetBase = await getTargetUrl(req, options);
-  const targetUrl = new URL(req.url!, targetBase);
+  if (!req.url) {
+    res.statusCode = 400;
+    res.end("Bad Request: Missing URL");
+    return;
+  }
+  const targetUrl = new URL(req.url, targetBase);
 
   // Apply path rewrite if provided
   if (options.rewrite) {
@@ -470,7 +515,7 @@ async function proxyHttp2Request(
       cleanHeaders["content-type"]?.includes("text/event-stream")
     ) {
       cleanHeaders["cache-control"] = "no-cache";
-      cleanHeaders["connection"] = "keep-alive";
+      cleanHeaders.connection = "keep-alive";
       cleanHeaders["x-accel-buffering"] = "no"; // Disable Nginx buffering
     }
 
@@ -478,7 +523,7 @@ async function proxyHttp2Request(
     if (options.selfHandleResponse) {
       // Let the user handle the response
       if (options.configure) {
-        options.configure(stream as any, options);
+        options.configure(stream, options);
       }
       return;
     }
@@ -507,7 +552,11 @@ async function handleWebSocketUpgrade(
   options: NormalizedProxyOptions,
 ): Promise<void> {
   const targetBase = await getTargetUrl(req, options);
-  const targetUrl = new URL(req.url!, targetBase);
+  if (!req.url) {
+    socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+    return;
+  }
+  const targetUrl = new URL(req.url, targetBase);
 
   const isSecure =
     targetUrl.protocol === "https:" || targetUrl.protocol === "wss:";
@@ -541,7 +590,7 @@ async function handleWebSocketUpgrade(
 
   proxySocket.on("connect", () => {
     proxySocket.write(headers.join("\r\n"));
-    if (head && head.length) proxySocket.write(head);
+    if (head?.length) proxySocket.write(head);
   });
 
   proxySocket.on("data", (data) => {
@@ -601,10 +650,10 @@ export function http2ProxyPlugin(): Plugin {
           if (context.startsWith("^")) {
             // RegExp pattern
             const pattern = new RegExp(context);
-            shouldProxy = pattern.test(req.url!);
+            shouldProxy = req.url ? pattern.test(req.url) : false;
           } else {
             // String prefix
-            shouldProxy = req.url!.startsWith(context);
+            shouldProxy = req.url?.startsWith(context);
           }
 
           if (shouldProxy) {
