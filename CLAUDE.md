@@ -11,9 +11,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `pnpm build` - Build the plugin for production
 
 ### Testing
-- `pnpm test` - Run all tests once
-- `pnpm test:watch` - Run tests in watch mode
+- `pnpm test` - Run all Vitest tests once
+- `pnpm test:watch` - Run Vitest tests in watch mode
 - `pnpm test <pattern>` - Run specific test files (e.g., `pnpm test connection-pool`)
+
+The test runner is Vitest, and the config is in `./vitest.config.ts`.
+You can find all the tests in `./test/*.test.ts`
 
 ### Code Quality
 - `pnpm lint` - Check code with Biome linter

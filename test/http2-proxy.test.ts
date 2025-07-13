@@ -11,7 +11,7 @@ import fetch from "node-fetch";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import http2ProxyPlugin from "../src/http2-proxy-enhanced";
+import http2ProxyPlugin from "../src/index";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -67,6 +67,49 @@ describe("HTTP/2 Proxy Plugin", () => {
             stream.write("data: Second message\\n\\n");
             stream.end();
           }, 100);
+        } else if (path === "/api/echo") {
+          // Echo back the request body
+          const chunks: Buffer[] = [];
+          stream.on("data", (chunk) => chunks.push(chunk));
+          stream.on("end", () => {
+            const body = Buffer.concat(chunks).toString();
+            stream.respond({
+              ":status": 200,
+              "content-type": headers["content-type"] || "text/plain",
+              "x-method": headers[":method"] || "",
+            });
+            stream.end(body);
+          });
+        } else if (path === "/api/upload") {
+          // Handle file upload
+          let totalBytes = 0;
+          stream.on("data", (chunk) => {
+            totalBytes += chunk.length;
+          });
+          stream.on("end", () => {
+            stream.respond({
+              ":status": 200,
+              "content-type": "application/json",
+            });
+            stream.end(JSON.stringify({ bytesReceived: totalBytes }));
+          });
+        } else if (path === "/api/protected") {
+          // Check for authentication
+          const authHeader = headers.authorization;
+          if (authHeader === "Basic dXNlcjpwYXNz") {
+            // user:pass in base64
+            stream.respond({
+              ":status": 200,
+              "content-type": "application/json",
+            });
+            stream.end(JSON.stringify({ message: "Authenticated" }));
+          } else {
+            stream.respond({
+              ":status": 401,
+              "www-authenticate": 'Basic realm="Protected"',
+            });
+            stream.end("Unauthorized");
+          }
         } else {
           stream.respond({ ":status": 404 });
           stream.end("Not Found");
@@ -84,6 +127,12 @@ describe("HTTP/2 Proxy Plugin", () => {
       server: {
         port: vitePort,
         proxy: {
+          "/api/protected": {
+            target: `https://localhost:${targetPort}`,
+            changeOrigin: true,
+            secure: false,
+            auth: "user:pass",
+          },
           "/api": {
             target: `https://localhost:${targetPort}`,
             changeOrigin: true,
@@ -214,6 +263,223 @@ describe("HTTP/2 Proxy Plugin", () => {
     expect(response.headers.get("content-type")).toBe("text/event-stream");
     expect(response.headers.get("cache-control")).toBe("no-cache");
     expect(response.headers.get("x-accel-buffering")).toBe("no");
+  });
+
+  it("should handle POST requests with JSON body", async () => {
+    const body = { name: "test", value: 123 };
+    const response = await fetch(`http://localhost:${vitePort}/api/echo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("x-method")).toBe("POST");
+    const responseBody = await response.json();
+    expect(responseBody).toEqual(body);
+  });
+
+  it("should handle PUT requests with form data", async () => {
+    const formData = "field1=value1&field2=value2";
+    const response = await fetch(`http://localhost:${vitePort}/api/echo`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formData,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(
+      "application/x-www-form-urlencoded",
+    );
+    expect(response.headers.get("x-method")).toBe("PUT");
+    const responseText = await response.text();
+    expect(responseText).toBe(formData);
+  });
+
+  it("should handle large file uploads", async () => {
+    // Create a large buffer (1MB)
+    const largeBuffer = Buffer.alloc(1024 * 1024, "x");
+
+    const response = await fetch(`http://localhost:${vitePort}/api/upload`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: largeBuffer,
+    });
+
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.bytesReceived).toBe(1024 * 1024);
+  });
+
+  it("should handle empty POST body", async () => {
+    const response = await fetch(`http://localhost:${vitePort}/api/echo`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: "",
+    });
+
+    expect(response.status).toBe(200);
+    const responseText = await response.text();
+    expect(responseText).toBe("");
+  });
+
+  it("should handle streaming request body", async () => {
+    // Note: fetch API doesn't support manual chunked encoding,
+    // but the proxy should handle streaming bodies correctly
+    const body = "Hello World! This is a streaming test.";
+
+    const response = await fetch(`http://localhost:${vitePort}/api/echo`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain",
+      },
+      body: body,
+    });
+
+    expect(response.status).toBe(200);
+    const responseText = await response.text();
+    expect(responseText).toBe(body);
+  });
+
+  it("should handle different content types", async () => {
+    const xmlBody = "<root><item>test</item></root>";
+    const response = await fetch(`http://localhost:${vitePort}/api/echo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/xml" },
+      body: xmlBody,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/xml");
+    const responseText = await response.text();
+    expect(responseText).toBe(xmlBody);
+  });
+
+  it("should handle proxy authentication with auth option", async () => {
+    const response = await fetch(`http://localhost:${vitePort}/api/protected`);
+
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data.message).toBe("Authenticated");
+  });
+
+  it("should handle requests to protected endpoints without proxy auth", async () => {
+    // Create a separate test for endpoint that doesn't have auth configured
+    const protectedServer = createHttp2Server({
+      key: readFileSync(join(__dirname, "fixtures", "key.pem")),
+      cert: readFileSync(join(__dirname, "fixtures", "cert.pem")),
+    });
+
+    const protectedPort = 9875;
+
+    protectedServer.on("stream", (stream, headers) => {
+      const authHeader = headers.authorization;
+      if (!authHeader) {
+        stream.respond({
+          ":status": 401,
+          "www-authenticate": 'Basic realm="Protected"',
+        });
+        stream.end("Unauthorized");
+      } else {
+        stream.respond({ ":status": 200 });
+        stream.end("OK");
+      }
+    });
+
+    await new Promise<void>((resolve) => {
+      protectedServer.listen(protectedPort, resolve);
+    });
+
+    // Create a new vite server with proxy but no auth
+    const noAuthServer = await createServer({
+      plugins: [http2ProxyPlugin()],
+      server: {
+        port: 9874,
+        proxy: {
+          "/protected": {
+            target: `https://localhost:${protectedPort}`,
+            secure: false,
+            changeOrigin: true,
+            // No auth option here
+          },
+        },
+      },
+      logLevel: "silent",
+    });
+
+    await noAuthServer.listen();
+
+    // Request should fail with 401
+    const response = await fetch(`http://localhost:9874/protected`);
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toBe(
+      'Basic realm="Protected"',
+    );
+
+    await noAuthServer.close();
+    await new Promise<void>((resolve) => {
+      protectedServer.close(resolve);
+    });
+  });
+
+  it("should propagate custom authorization headers", async () => {
+    // Test that custom auth headers from client are passed through
+    const customAuthServer = createHttp2Server({
+      key: readFileSync(join(__dirname, "fixtures", "key.pem")),
+      cert: readFileSync(join(__dirname, "fixtures", "cert.pem")),
+    });
+
+    const customAuthPort = 9873;
+
+    customAuthServer.on("stream", (stream, headers) => {
+      stream.respond({
+        ":status": 200,
+        "content-type": "application/json",
+      });
+      stream.end(
+        JSON.stringify({
+          receivedAuth: headers.authorization || "none",
+        }),
+      );
+    });
+
+    await new Promise<void>((resolve) => {
+      customAuthServer.listen(customAuthPort, resolve);
+    });
+
+    const customAuthViteServer = await createServer({
+      plugins: [http2ProxyPlugin()],
+      server: {
+        port: 9872,
+        proxy: {
+          "/custom": {
+            target: `https://localhost:${customAuthPort}`,
+            secure: false,
+            changeOrigin: true,
+          },
+        },
+      },
+      logLevel: "silent",
+    });
+
+    await customAuthViteServer.listen();
+
+    // Send request with custom auth header
+    const response = await fetch(`http://localhost:9872/custom`, {
+      headers: {
+        Authorization: "Bearer my-token-123",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data.receivedAuth).toBe("Bearer my-token-123");
+
+    await customAuthViteServer.close();
+    await new Promise<void>((resolve) => {
+      customAuthServer.close(resolve);
+    });
   });
 });
 
