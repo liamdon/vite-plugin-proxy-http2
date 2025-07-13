@@ -217,8 +217,8 @@ describe("Http2ConnectionPool", () => {
     // Create a new pool with a small limit for testing
     const smallPool = new Http2ConnectionPool(mockLogger);
 
-    // Access private field for testing (we'd normally expose this via a setter)
-    (smallPool as any).maxSessions = 3;
+    // Use test-only method to set max sessions
+    smallPool._setMaxSessions(3);
 
     const origins = [
       `https://localhost:${targetPort}`,
@@ -247,7 +247,7 @@ describe("Http2ConnectionPool", () => {
   it("should clean up old sessions based on age", async () => {
     // Create a new pool with short max age for testing
     const agePool = new Http2ConnectionPool(mockLogger);
-    (agePool as any).maxAge = 100; // 100ms for testing
+    agePool._setMaxAge(100); // 100ms for testing
 
     const origin = `https://localhost:${targetPort}`;
     const _session = agePool.getSession(origin, { secure: false });
@@ -295,15 +295,21 @@ describe("Http2ConnectionPool", () => {
 
     // Get initial session
     pool.getSession(origin, { secure: false });
-    const initialLastUsed = (pool as any).sessions.get(origin).lastUsed;
+    const initialLastUsed = pool._getSessionLastUsed(origin);
+    expect(initialLastUsed).toBeDefined();
 
     // Wait a bit
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     // Get session again
     pool.getSession(origin, { secure: false });
-    const updatedLastUsed = (pool as any).sessions.get(origin).lastUsed;
+    const updatedLastUsed = pool._getSessionLastUsed(origin);
+    expect(updatedLastUsed).toBeDefined();
 
+    // Type guards ensure these are defined
+    if (updatedLastUsed === undefined || initialLastUsed === undefined) {
+      throw new Error("Expected timestamps to be defined");
+    }
     expect(updatedLastUsed).toBeGreaterThan(initialLastUsed);
 
     pool.close();

@@ -138,4 +138,27 @@ export class Http2ConnectionPool {
     const session = this.sessions.get(origin);
     return !!(session && !session.session.closed && !session.session.destroyed);
   }
+
+  /* ============================================================
+   * TEST-ONLY METHODS - DO NOT USE IN PRODUCTION CODE
+   * These methods are exposed solely for testing purposes to
+   * avoid using type assertions. They should never be used
+   * outside of test files.
+   * ============================================================ */
+
+  _setMaxSessions(max: number): void {
+    this.maxSessions = max;
+  }
+
+  _setMaxAge(age: number): void {
+    this.maxAge = age;
+  }
+
+  _getSessionLastUsed(origin: string): number | undefined {
+    return this.sessions.get(origin)?.lastUsed;
+  }
+
+  /* ============================================================
+   * END TEST-ONLY METHODS
+   * ============================================================ */
 }
