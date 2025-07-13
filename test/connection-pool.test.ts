@@ -4,8 +4,14 @@ import { createSecureServer as createHttp2Server } from "node:http2";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { Http2ConnectionPool } from "../src/connection-pool";
+import { Http2ConnectionPool, type Http2Session } from "../src/connection-pool";
 import type { createLogger } from "../src/logger";
+
+// Type for accessing internal connection pool structure in tests
+interface TestableConnectionPool extends Http2ConnectionPool {
+  sessions: Map<string, Http2Session>;
+  cleanup(): void;
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -287,6 +293,184 @@ describe("Http2ConnectionPool", () => {
     expect(connectionPool.getSessionCount()).toBe(1);
 
     connectionPool.close();
+  });
+
+  it("should evict oldest session when reaching maxSessions limit", async () => {
+    const pool = new Http2ConnectionPool(mockLogger);
+    pool._setMaxSessions(3); // Set low limit for testing
+
+    // Create 3 sessions to the same working server with different paths
+    // This ensures sessions are actually created
+    const baseOrigin = `https://localhost:${targetPort}`;
+    const _origin1 = `${baseOrigin}/path1`;
+    const _origin2 = `${baseOrigin}/path2`;
+    const _origin3 = `${baseOrigin}/path3`;
+    const _origin4 = `${baseOrigin}/path4`;
+
+    // Note: HTTP/2 connection pool is per origin (host:port), not path
+    // So we need to use the actual test server for all connections
+    pool.getSession(baseOrigin, { secure: false });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Since these are all the same origin, we should still have 1 session
+    expect(pool.getSessionCount()).toBe(1);
+
+    // To properly test eviction, we need different origins
+    // Let's adjust to test the behavior we can actually test
+    const testPool = new Http2ConnectionPool(mockLogger);
+    testPool._setMaxSessions(2); // Even lower limit
+
+    // First session
+    const session1 = testPool.getSession(baseOrigin, { secure: false });
+    expect(testPool.getSessionCount()).toBe(1);
+
+    // Mock a second origin by manually adding to the pool
+    // This is a workaround since we can't easily create multiple test servers
+    const mockOrigin2 = "https://example.com:443";
+    const mockSession2 = {
+      session: session1, // Reuse session object for testing
+      origin: mockOrigin2,
+      lastUsed: Date.now() - 1000, // Make it older
+    };
+
+    // Access internal map for testing (not ideal but necessary)
+    const testablePool = testPool as TestableConnectionPool;
+    testablePool.sessions.set(mockOrigin2, mockSession2);
+    expect(testPool.getSessionCount()).toBe(2);
+
+    // Now getting a new session for a third origin should evict the oldest
+    const _session3 = testPool.getSession(`https://localhost:8443`, {
+      secure: false,
+    });
+
+    // The mock origin2 should have been evicted as it was oldest
+    expect(testPool.getSessionCount()).toBe(2);
+    expect(testPool.hasSession(mockOrigin2)).toBe(false);
+
+    testPool.close();
+  });
+
+  it("should clean up multiple expired sessions", async () => {
+    const pool = new Http2ConnectionPool(mockLogger);
+    pool._setMaxAge(50); // 50ms for testing
+
+    // Create a session to the actual test server
+    const baseOrigin = `https://localhost:${targetPort}`;
+    pool.getSession(baseOrigin, { secure: false });
+
+    // Manually add mock sessions for testing cleanup
+    const testablePool = pool as TestableConnectionPool;
+    const mockOrigins = ["https://example1.com", "https://example2.com"];
+
+    mockOrigins.forEach((origin) => {
+      testablePool.sessions.set(origin, {
+        session: {
+          closed: false,
+          destroyed: false,
+          close: vi.fn(),
+        },
+        origin,
+        lastUsed: Date.now() - 1000, // Old timestamp
+      });
+    });
+
+    expect(pool.getSessionCount()).toBe(3);
+
+    // Wait for all to expire
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Manually trigger cleanup
+    const testablePool2 = pool as TestableConnectionPool;
+    testablePool2.cleanup();
+
+    // All old sessions should be cleaned up
+    expect(pool.hasSession(baseOrigin)).toBe(false); // Real session expired
+    mockOrigins.forEach((origin) => {
+      expect(pool.hasSession(origin)).toBe(false);
+    });
+    expect(pool.getSessionCount()).toBe(0);
+
+    pool.close();
+  });
+
+  it("should handle cleanup when sessions are actively used", async () => {
+    const pool = new Http2ConnectionPool(mockLogger);
+    pool._setMaxAge(100); // 100ms for testing
+
+    const activeOrigin = `https://localhost:${targetPort}`;
+
+    // Create active session
+    pool.getSession(activeOrigin, { secure: false });
+
+    // Add a mock inactive session
+    const testablePool = pool as TestableConnectionPool;
+    const inactiveOrigin = "https://inactive.example.com";
+    testablePool.sessions.set(inactiveOrigin, {
+      session: {
+        closed: false,
+        destroyed: false,
+        close: vi.fn(),
+      },
+      origin: inactiveOrigin,
+      lastUsed: Date.now(), // Will become old
+    });
+
+    // Keep using the active session
+    for (let i = 0; i < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      pool.getSession(activeOrigin, { secure: false }); // Refresh lastUsed
+    }
+
+    // Manually trigger cleanup
+    testablePool.cleanup();
+
+    // Active session should still exist, inactive should be cleaned
+    expect(pool.hasSession(activeOrigin)).toBe(true);
+    expect(pool.hasSession(inactiveOrigin)).toBe(false);
+
+    pool.close();
+  });
+
+  it("should properly close all sessions on cleanup", async () => {
+    const pool = new Http2ConnectionPool(mockLogger);
+
+    // Create one real session
+    const realSession = pool.getSession(`https://localhost:${targetPort}`, {
+      secure: false,
+    });
+
+    // Add mock sessions
+    const testablePool = pool as TestableConnectionPool;
+    const mockSessions = [];
+
+    for (let i = 1; i <= 2; i++) {
+      const mockSession = {
+        closed: false,
+        destroyed: false,
+        close: vi.fn(function () {
+          this.closed = true;
+        }),
+      };
+      const mockOrigin = `https://example${i}.com`;
+      testablePool.sessions.set(mockOrigin, {
+        session: mockSession,
+        origin: mockOrigin,
+        lastUsed: Date.now(),
+      });
+      mockSessions.push(mockSession);
+    }
+
+    expect(pool.getSessionCount()).toBe(3);
+
+    // Close all sessions
+    pool.close();
+
+    // Verify all sessions are closed
+    expect(pool.getSessionCount()).toBe(0);
+    expect(realSession.closed || realSession.destroyed).toBe(true);
+    mockSessions.forEach((session) => {
+      expect(session.close).toHaveBeenCalled();
+    });
   });
 
   it("should properly update lastUsed timestamp on reuse", async () => {

@@ -248,6 +248,13 @@ function createHttp2Headers(
     headers["x-forwarded-port"] = String(req.socket.localPort);
   }
 
+  // Add authentication header if auth option is provided
+  if (options.auth && !headers.authorization) {
+    const authString = Buffer.from(options.auth).toString("base64");
+    headers.authorization = `Basic ${authString}`;
+    logger?.debug(`Added auth header: Basic ${authString.substring(0, 10)}...`);
+  }
+
   return headers;
 }
 
@@ -311,6 +318,7 @@ async function proxyHttp2Request(
   next: () => void,
 ): Promise<void> {
   const startTime = Date.now();
+
   // Check bypass
   if (await handleBypass(req, res, options, next)) {
     return;

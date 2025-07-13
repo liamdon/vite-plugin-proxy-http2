@@ -13,3 +13,6 @@ demo/certs/
 
 # Test certificates
 test/fixtures/*.pem
+
+# Claude settings
+.claude
