@@ -1,14 +1,7 @@
 
 ## Critical Issues to Address
 
-1. **Missing Test Coverage**
-   - WebSocket functionality is implemented but completely untested
-   - No tests for authentication scenarios
-   - Missing tests for concurrent connection limits
-   - No tests for POST/PUT request body handling
-   - Connection pool cleanup and eviction not tested
-
-2. **Security Vulnerabilities**
+1. **Security Vulnerabilities**
    - No input validation for proxy targets (SSRF risk)
    - Missing header sanitization (header injection risk)
    - Cookie rewriting doesn't validate domain/path values
