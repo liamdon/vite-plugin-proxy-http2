@@ -5,11 +5,12 @@ import type {
   IncomingHttpHeaders,
   OutgoingHttpHeaders,
 } from "node:http2";
-import { connect, constants } from "node:http2";
+import { constants } from "node:http2";
 import * as net from "node:net";
 import type { TLSSocket } from "node:tls";
 import * as tls from "node:tls";
 import type { Plugin, ProxyOptions, ResolvedConfig } from "vite";
+import { Http2ConnectionPool } from "./connection-pool";
 import { createLogger, type Logger, logProxyRequest } from "./logger";
 
 let logger: Logger;
@@ -78,100 +79,7 @@ interface NormalizedProxyOptions extends Http2ProxyOptions {
   changeOrigin: boolean;
 }
 
-interface Http2Session {
-  session: ClientHttp2Session;
-  origin: string;
-  lastUsed: number;
-}
-
-class Http2ConnectionPool {
-  private sessions: Map<string, Http2Session> = new Map();
-  private maxAge = 5 * 60 * 1000; // 5 minutes
-  private maxSessions = 100;
-
-  getSession(
-    origin: string,
-    options: NormalizedProxyOptions,
-  ): ClientHttp2Session {
-    const existing = this.sessions.get(origin);
-
-    if (existing && !existing.session.closed && !existing.session.destroyed) {
-      existing.lastUsed = Date.now();
-      return existing.session;
-    }
-
-    // Connection options
-    const connectOptions: tls.ConnectionOptions & { auth?: string } = {
-      rejectUnauthorized: options.secure !== false,
-    };
-
-    // Add authentication if provided
-    if (options.auth) {
-      const [username, password] = options.auth.split(":");
-      connectOptions.auth = `${username}:${password}`;
-    }
-
-    const session = connect(origin, connectOptions);
-
-    session.on("error", (err) => {
-      logger?.error(`HTTP/2 session error for ${origin}`, err);
-      this.sessions.delete(origin);
-    });
-
-    session.on("close", () => {
-      logger?.debug(`HTTP/2 session closed for ${origin}`);
-      this.sessions.delete(origin);
-    });
-
-    // Implement connection limit
-    if (this.sessions.size >= this.maxSessions) {
-      this.evictOldest();
-    }
-
-    this.sessions.set(origin, {
-      session,
-      origin,
-      lastUsed: Date.now(),
-    });
-
-    // Cleanup old sessions periodically
-    this.cleanup();
-
-    return session;
-  }
-
-  private evictOldest() {
-    let oldest: [string, Http2Session] | null = null;
-    for (const entry of this.sessions.entries()) {
-      if (!oldest || entry[1].lastUsed < oldest[1].lastUsed) {
-        oldest = entry;
-      }
-    }
-    if (oldest) {
-      oldest[1].session.close();
-      this.sessions.delete(oldest[0]);
-    }
-  }
-
-  private cleanup() {
-    const now = Date.now();
-    for (const [origin, sess] of this.sessions) {
-      if (now - sess.lastUsed > this.maxAge) {
-        sess.session.close();
-        this.sessions.delete(origin);
-      }
-    }
-  }
-
-  close() {
-    for (const sess of this.sessions.values()) {
-      sess.session.close();
-    }
-    this.sessions.clear();
-  }
-}
-
-const connectionPool = new Http2ConnectionPool();
+let connectionPool: Http2ConnectionPool;
 
 function normalizeProxyOptions(
   options: string | Http2ProxyOptions | ProxyOptions,
@@ -350,7 +258,14 @@ async function getTargetUrl(
   // Handle router function
   if (options.router) {
     if (typeof options.router === "function") {
-      return options.router(req);
+      const target = await options.router(req);
+      // Validate router returned URL
+      try {
+        new URL(target);
+        return target;
+      } catch (_err) {
+        throw new Error(`Router returned invalid URL: ${target}`);
+      }
     } else {
       return options.router;
     }
@@ -402,13 +317,34 @@ async function proxyHttp2Request(
   }
 
   // Get target URL (may be dynamic via router)
-  const targetBase = await getTargetUrl(req, options);
+  let targetBase: string;
+  try {
+    targetBase = await getTargetUrl(req, options);
+  } catch (err) {
+    logger?.error("Failed to get target URL", err);
+    res.statusCode = 500;
+    res.end("Internal Server Error: Invalid proxy target");
+    return;
+  }
+
   if (!req.url) {
     res.statusCode = 400;
     res.end("Bad Request: Missing URL");
     return;
   }
-  const targetUrl = new URL(req.url, targetBase);
+
+  let targetUrl: URL;
+  try {
+    targetUrl = new URL(req.url, targetBase);
+  } catch (err) {
+    logger?.error(
+      `Invalid URL construction: ${req.url} with base ${targetBase}`,
+      err,
+    );
+    res.statusCode = 400;
+    res.end("Bad Request: Invalid URL");
+    return;
+  }
 
   // Apply path rewrite if provided
   if (options.rewrite) {
@@ -417,7 +353,15 @@ async function proxyHttp2Request(
   }
 
   const origin = `${targetUrl.protocol}//${targetUrl.host}`;
-  const session = connectionPool.getSession(origin, options);
+  let session: ClientHttp2Session;
+  try {
+    session = connectionPool.getSession(origin, options);
+  } catch (err) {
+    logger?.error(`Failed to get HTTP/2 session for ${origin}`, err);
+    res.statusCode = 502;
+    res.end("Bad Gateway: Failed to establish HTTP/2 connection");
+    return;
+  }
 
   const headers = createHttp2Headers(req, targetUrl, options);
   headers[HTTP2_HEADER_PATH] = targetUrl.pathname + targetUrl.search;
@@ -425,9 +369,17 @@ async function proxyHttp2Request(
   // Set timeout if specified
   const timeout = options.proxyTimeout || options.timeout || 120000;
 
-  const stream = session.request(headers, {
-    endStream: req.method === "GET" || req.method === "HEAD",
-  });
+  let stream: ClientHttp2Stream;
+  try {
+    stream = session.request(headers, {
+      endStream: req.method === "GET" || req.method === "HEAD",
+    });
+  } catch (err) {
+    logger?.error(`Failed to create HTTP/2 stream for ${origin}`, err);
+    res.statusCode = 502;
+    res.end("Bad Gateway: Failed to create HTTP/2 stream");
+    return;
+  }
 
   // Handle timeout
   const timeoutHandle = setTimeout(() => {
@@ -551,12 +503,31 @@ async function handleWebSocketUpgrade(
   head: Buffer,
   options: NormalizedProxyOptions,
 ): Promise<void> {
-  const targetBase = await getTargetUrl(req, options);
+  let targetBase: string;
+  try {
+    targetBase = await getTargetUrl(req, options);
+  } catch (err) {
+    logger?.error("Failed to get target URL for WebSocket", err);
+    socket.end("HTTP/1.1 500 Internal Server Error\r\n\r\n");
+    return;
+  }
+
   if (!req.url) {
     socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
     return;
   }
-  const targetUrl = new URL(req.url, targetBase);
+
+  let targetUrl: URL;
+  try {
+    targetUrl = new URL(req.url, targetBase);
+  } catch (err) {
+    logger?.error(
+      `Invalid WebSocket URL: ${req.url} with base ${targetBase}`,
+      err,
+    );
+    socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+    return;
+  }
 
   const isSecure =
     targetUrl.protocol === "https:" || targetUrl.protocol === "wss:";
@@ -628,6 +599,7 @@ export function http2ProxyPlugin(): Plugin {
     configResolved(resolvedConfig) {
       config = resolvedConfig;
       logger = createLogger("vite:http2-proxy", config);
+      connectionPool = new Http2ConnectionPool(logger);
     },
 
     configureServer(server) {
@@ -703,6 +675,21 @@ export function http2ProxyPlugin(): Plugin {
           }
         });
       }
+
+      // Clean up HTTP/2 sessions when dev server closes
+      server.httpServer?.on("close", () => {
+        logger?.info("Dev server closing, cleaning up HTTP/2 sessions");
+        connectionPool.close();
+      });
+
+      // Also handle SIGINT/SIGTERM for graceful shutdown
+      const cleanup = () => {
+        logger?.info("Received shutdown signal, cleaning up HTTP/2 sessions");
+        connectionPool.close();
+      };
+
+      process.once("SIGINT", cleanup);
+      process.once("SIGTERM", cleanup);
     },
 
     buildEnd() {
