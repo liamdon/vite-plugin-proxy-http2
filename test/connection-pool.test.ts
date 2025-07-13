@@ -353,4 +353,3 @@ describe("Http2ConnectionPool", () => {
     connectionPool.close();
   });
 });
-

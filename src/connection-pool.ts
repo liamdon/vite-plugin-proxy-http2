@@ -139,4 +139,3 @@ export class Http2ConnectionPool {
     return !!(session && !session.session.closed && !session.session.destroyed);
   }
 }
-
