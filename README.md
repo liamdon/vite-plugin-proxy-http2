@@ -1,6 +1,7 @@
 # Vite HTTP/2 Proxy Plugin
 
 [![CI](https://github.com/liamdon/vite-plugin-proxy-http2/actions/workflows/main.yml/badge.svg)](https://github.com/liamdon/vite-plugin-proxy-http2/actions/workflows/main.yml)
+[![npm version](https://badge.fury.io/js/vite-plugin-proxy-http2.svg)](https://www.npmjs.com/package/vite-plugin-proxy-http2)
 
 Vite plugin that provides HTTP/2 proxy support with full feature parity to Vite's built-in proxy.
 
@@ -265,12 +266,15 @@ import { defineConfig } from 'vite'
 +import http2ProxyPlugin from 'vite-http2-proxy'
 
 export default defineConfig({
-+  plugins: [http2ProxyPlugin()],
++  plugins: [http2ProxyPlugin({
++    proxy: {
++      // Your existing proxy config works as-is,
++      // just move it into the plugin config
++      '/api': 'https://api.example.com'
++    }
+  })],
   server: {
-    proxy: {
-      // Your existing proxy config works as-is
-      '/api': 'https://api.example.com'
-    }
+    // Remove proxy config from here
   }
 })
 ```
