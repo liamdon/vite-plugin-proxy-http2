@@ -911,11 +911,17 @@ async function handleWebSocketUpgrade(
   head: Buffer,
   options: NormalizedProxyOptions,
 ): Promise<void> {
+  const socketId = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
+  logger?.debug(`[WS ${socketId}] Starting WebSocket upgrade for ${req.url}`);
+
   let targetBase: string;
   try {
     targetBase = await getTargetUrl(req, options);
   } catch (err) {
-    logger?.error("Failed to get target URL for WebSocket", err);
+    logger?.error(
+      `[WS ${socketId}] Failed to get target URL for WebSocket`,
+      err,
+    );
     socket.end("HTTP/1.1 500 Internal Server Error\r\n\r\n");
     return;
   }
@@ -968,6 +974,7 @@ async function handleWebSocketUpgrade(
   headers.push("", ""); // Empty line to end headers
 
   proxySocket.on("connect", () => {
+    logger?.debug(`[WS ${socketId}] Connected to target ${targetUrl.host}`);
     proxySocket.write(headers.join("\r\n"));
     if (head?.length) proxySocket.write(head);
   });
@@ -981,19 +988,25 @@ async function handleWebSocketUpgrade(
   });
 
   proxySocket.on("error", (err) => {
-    logger?.error(`WebSocket proxy error: ${err.message}`, err);
+    logger?.error(
+      `[WS ${socketId}] WebSocket proxy error: ${err.message}`,
+      err,
+    );
     socket.destroy();
   });
 
-  socket.on("error", () => {
+  socket.on("error", (err) => {
+    logger?.error(`[WS ${socketId}] Client socket error: ${err.message}`);
     proxySocket.destroy();
   });
 
   proxySocket.on("close", () => {
+    logger?.debug(`[WS ${socketId}] Target connection closed`);
     socket.end();
   });
 
   socket.on("close", () => {
+    logger?.debug(`[WS ${socketId}] Client connection closed`);
     proxySocket.end();
   });
 }
@@ -1087,7 +1100,11 @@ export function http2ProxyPlugin(
       );
 
       // Handle WebSocket upgrades
-      server.httpServer?.on("upgrade", async (req, socket, head) => {
+      server.httpServer?.on("upgrade", (req, socket, head) => {
+        logger?.debug(
+          `WebSocket upgrade request: ${req.url} from ${req.socket.remoteAddress}`,
+        );
+
         for (const [context, proxyOptions] of Object.entries(
           savedProxyConfig,
         )) {
@@ -1108,20 +1125,44 @@ export function http2ProxyPlugin(
           }
 
           if (shouldProxy) {
-            try {
-              await handleWebSocketUpgrade(req, socket, head, opts);
-            } catch (err) {
-              config.logger.error(`WebSocket proxy error: ${err}`);
+            logger?.info(
+              `WebSocket upgrade matched route ${context} for ${req.url}`,
+            );
+            
+            // Handle the WebSocket upgrade without blocking the event loop
+            handleWebSocketUpgrade(req, socket, head, opts).catch((err) => {
+              logger?.error(`WebSocket proxy error for ${req.url}:`, err);
               socket.destroy();
-            }
+            });
+            
             break;
           }
+        }
+
+        // If no route matched, log it
+        const routeMatched = Object.entries(savedProxyConfig).some(
+          ([context, opts]) => {
+            if (!req.url) return false;
+            const normalized = normalizeProxyOptions(opts, globalDefaults);
+            return (
+              normalized.ws &&
+              (context.startsWith("^")
+                ? new RegExp(context).test(req.url)
+                : req.url.startsWith(context))
+            );
+          },
+        );
+
+        if (!req.url || !routeMatched) {
+          logger?.debug(
+            `No WebSocket route matched for upgrade request: ${req.url}`,
+          );
         }
       });
 
       // Process each proxy configuration
       for (const [context, proxyOptions] of Object.entries(savedProxyConfig)) {
-        const opts = normalizeProxyOptions(proxyOptions);
+        const opts = normalizeProxyOptions(proxyOptions, globalDefaults);
 
         // Create middleware for this proxy context
         server.middlewares.use(async (req, res, next) => {
