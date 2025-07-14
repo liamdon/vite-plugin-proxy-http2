@@ -39,6 +39,11 @@ import http2ProxyPlugin from 'vite-plugin-proxy-http2'
 export default defineConfig({
   plugins: [
     http2ProxyPlugin({
+      // Global settings (optional)
+      maxSessions: 50,              // Limit HTTP/2 sessions
+      defaultTimeout: 30000,        // 30 second timeout for all proxies
+      
+      // Proxy routes
       proxy: {
         '/api': 'https://api.example.com',
         '/ws': {
@@ -183,6 +188,24 @@ export default defineConfig({
 }
 ```
 
+#### Timeout Configuration
+```typescript
+http2ProxyPlugin({
+  // Set global defaults for all proxies
+  defaultTimeout: 30000,        // 30 seconds
+  defaultProxyTimeout: 25000,   // 25 seconds
+  
+  proxy: {
+    '/api': 'https://api.example.com',  // Uses global defaults
+    
+    '/slow-api': {
+      target: 'https://slow-api.example.com',
+      timeout: 60000  // Override for specific route
+    }
+  }
+})
+```
+
 #### Server-Sent Events
 ```typescript
 '/events': {
@@ -208,6 +231,41 @@ export default defineConfig({
 
 ## Configuration Options
 
+### Global Plugin Options
+
+These options are configured at the plugin level and affect all proxies:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `proxy` | `object` | - | Proxy route configurations |
+| `maxSessions` | `number` | `100` | Maximum number of HTTP/2 sessions |
+| `sessionMaxAge` | `number` | `300000` | Session idle timeout in milliseconds (5 minutes) |
+| `connectionTimeout` | `number` | `10000` | Initial connection timeout in milliseconds |
+| `maxQueueSize` | `number` | `100` | Maximum queued requests across all origins |
+| `queueTimeout` | `number` | `30000` | Queue timeout in milliseconds |
+| `defaultTimeout` | `number` | `120000` | Default timeout for all proxies in milliseconds |
+| `defaultProxyTimeout` | `number` | - | Default proxy-specific timeout in milliseconds |
+
+Example:
+```typescript
+http2ProxyPlugin({
+  // Global settings
+  maxSessions: 50,
+  sessionMaxAge: 2 * 60 * 1000, // 2 minutes
+  maxQueueSize: 200,
+  defaultTimeout: 30000, // 30 seconds
+  
+  // Proxy routes
+  proxy: {
+    '/api': 'https://api.example.com'
+  }
+})
+```
+
+### Per-Proxy Options
+
+These options can be configured for each individual proxy route:
+
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `target` | `string \| object` | required | Backend server URL |
@@ -226,8 +284,8 @@ export default defineConfig({
 | `cookieDomainRewrite` | `string \| object` | - | Rewrite cookie domains |
 | `cookiePathRewrite` | `string \| object` | - | Rewrite cookie paths |
 | `router` | `string \| function` | - | Dynamic target routing |
-| `timeout` | `number` | `120000` | Proxy timeout in milliseconds |
-| `proxyTimeout` | `number` | `120000` | Proxy timeout in milliseconds |
+| `timeout` | `number` | global default | Proxy timeout in milliseconds (overrides global) |
+| `proxyTimeout` | `number` | global default | Proxy timeout in milliseconds (overrides global) |
 | `selfHandleResponse` | `boolean` | `false` | Handle response manually |
 | `followRedirects` | `boolean` | `false` | Follow HTTP redirects |
 | `sse` | `boolean` | `false` | Optimize for Server-Sent Events |
@@ -251,8 +309,9 @@ LOG_LEVEL=debug npm run dev
 The plugin implements several performance optimizations:
 
 - **Connection Pooling**: Reuses HTTP/2 connections across requests
-- **Automatic Cleanup**: Removes idle connections after 5 minutes
-- **Connection Limits**: Prevents resource exhaustion with a maximum of 100 concurrent sessions
+- **Automatic Cleanup**: Removes idle connections after configurable timeout (default: 5 minutes)
+- **Connection Limits**: Prevents resource exhaustion with configurable session limits (default: 100)
+- **Request Queueing**: Handles high load with configurable queue size (default: 100 requests)
 - **Stream Management**: Proper HTTP/2 stream lifecycle handling
 - **Timeout Handling**: Configurable timeouts prevent hanging requests
 

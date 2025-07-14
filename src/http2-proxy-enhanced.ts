@@ -56,10 +56,6 @@ interface Http2ProxyOptions extends Omit<ProxyOptions, "configure" | "bypass"> {
   timeout?: number;
   proxyTimeout?: number;
 
-  // Request queue options
-  maxQueueSize?: number;
-  queueTimeout?: number;
-
   // Override configure with HTTP/2 stream type
   configure?: (stream: ClientHttp2Stream, options: Http2ProxyOptions) => void;
 
@@ -135,12 +131,18 @@ async function supportsHttp2(
 
 function normalizeProxyOptions(
   options: string | Http2ProxyOptions | ProxyOptions,
+  globalDefaults?: {
+    defaultTimeout?: number;
+    defaultProxyTimeout?: number;
+  },
 ): NormalizedProxyOptions {
   if (typeof options === "string") {
     return {
       target: options,
       changeOrigin: true,
       xfwd: true,
+      timeout: globalDefaults?.defaultTimeout,
+      proxyTimeout: globalDefaults?.defaultProxyTimeout,
     };
   }
 
@@ -168,6 +170,9 @@ function normalizeProxyOptions(
     xfwd: true,
     secure: true,
     target: targetUrl,
+    // Apply global defaults if not specified in proxy options
+    timeout: options.timeout ?? globalDefaults?.defaultTimeout,
+    proxyTimeout: options.proxyTimeout ?? globalDefaults?.defaultProxyTimeout,
   };
 
   // Handle ProxyOptions that need to be converted to Http2ProxyOptions
@@ -995,6 +1000,19 @@ async function handleWebSocketUpgrade(
 
 export interface Http2ProxyPluginOptions {
   proxy?: Record<string, string | ProxyOptions>;
+
+  // Global connection pool settings
+  maxSessions?: number; // Maximum number of HTTP/2 sessions (default: 100)
+  sessionMaxAge?: number; // Session idle timeout in ms (default: 300000 - 5 minutes)
+  connectionTimeout?: number; // Initial connection timeout in ms (default: 10000)
+
+  // Global request queue settings
+  maxQueueSize?: number; // Maximum queued requests across all origins (default: 100)
+  queueTimeout?: number; // Queue timeout in ms (default: 30000)
+
+  // Global timeout defaults
+  defaultTimeout?: number; // Default timeout for all proxies in ms (default: 120000)
+  defaultProxyTimeout?: number; // Default proxy-specific timeout in ms
 }
 
 export function http2ProxyPlugin(
@@ -1002,6 +1020,12 @@ export function http2ProxyPlugin(
 ): Plugin {
   let config: ResolvedConfig;
   let savedProxyConfig: Record<string, string | ProxyOptions> = {};
+
+  // Extract global defaults for timeout settings
+  const globalDefaults = {
+    defaultTimeout: options.defaultTimeout,
+    defaultProxyTimeout: options.defaultProxyTimeout,
+  };
 
   // Use plugin options proxy config if provided
   if (options.proxy) {
@@ -1035,24 +1059,19 @@ export function http2ProxyPlugin(
     configResolved(resolvedConfig) {
       config = resolvedConfig;
       logger = createLogger("vite:http2-proxy", config);
-      connectionPool = new Http2ConnectionPool(logger);
 
-      // Extract queue options from saved proxy configurations
-      let queueOptions = {};
-      if (savedProxyConfig) {
-        for (const proxyOpts of Object.values(savedProxyConfig)) {
-          const opts = normalizeProxyOptions(proxyOpts);
-          if (opts.maxQueueSize || opts.queueTimeout) {
-            queueOptions = {
-              maxQueueSize: opts.maxQueueSize,
-              queueTimeout: opts.queueTimeout,
-            };
-            break;
-          }
-        }
-      }
+      // Initialize connection pool with global settings
+      connectionPool = new Http2ConnectionPool(logger, {
+        maxSessions: options.maxSessions,
+        sessionMaxAge: options.sessionMaxAge,
+        connectionTimeout: options.connectionTimeout,
+      });
 
-      requestQueue = new RequestQueue(logger, queueOptions);
+      // Initialize request queue with global settings
+      requestQueue = new RequestQueue(logger, {
+        maxQueueSize: options.maxQueueSize,
+        queueTimeout: options.queueTimeout,
+      });
     },
 
     configureServer(server) {
@@ -1072,7 +1091,7 @@ export function http2ProxyPlugin(
         for (const [context, proxyOptions] of Object.entries(
           savedProxyConfig,
         )) {
-          const opts = normalizeProxyOptions(proxyOptions);
+          const opts = normalizeProxyOptions(proxyOptions, globalDefaults);
 
           if (!opts.ws) continue;
 

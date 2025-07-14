@@ -24,7 +24,7 @@ export class RequestQueue {
 
   constructor(logger?: Logger, options: RequestQueueOptions = {}) {
     this.logger = logger;
-    this.maxQueueSize = options.maxQueueSize || 100;
+    this.maxQueueSize = options.maxQueueSize || 512;
     this.queueTimeout = options.queueTimeout || 30000; // 30 seconds default
   }
 
