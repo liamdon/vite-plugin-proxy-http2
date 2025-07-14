@@ -539,6 +539,18 @@ async function proxyHttp2Request(
     return;
   }
 
+  // Debug log headers for WebSocket routes
+  if (options.ws && logger) {
+    logger.debug(`Request to WebSocket route ${req.url}:`);
+    logger.debug(`  Method: ${req.method}`);
+    logger.debug(`  Upgrade: ${req.headers.upgrade}`);
+    logger.debug(`  Connection: ${req.headers.connection}`);
+    logger.debug(`  Sec-WebSocket-Key: ${req.headers["sec-websocket-key"]}`);
+    logger.debug(
+      `  Sec-WebSocket-Version: ${req.headers["sec-websocket-version"]}`,
+    );
+  }
+
   // Check if this is a WebSocket upgrade request
   // Note: Some WebSocket clients first send a POST request before upgrading
   const isWebSocketRequest =
@@ -547,9 +559,15 @@ async function proxyHttp2Request(
       req.headers["sec-websocket-key"]) ||
     req.headers["sec-websocket-version"];
 
-  if (isWebSocketRequest && options.ws) {
-    // Handle WebSocket requests with HTTP/1.1
-    logger?.info(`Handling WebSocket request to ${req.url} using HTTP/1.1`);
+  // For WebSocket-enabled routes, always use HTTP/1.1 as WebSocket requires it
+  if (options.ws) {
+    logger?.info(`Using HTTP/1.1 for WebSocket-enabled route ${req.url}`);
+    return proxyHttp1Request(req, res, options, next);
+  }
+
+  if (isWebSocketRequest) {
+    // This shouldn't happen if ws:true is set, but handle it anyway
+    logger?.warn(`WebSocket upgrade detected but ws:false for ${req.url}`);
     return proxyHttp1Request(req, res, options, next);
   }
 
@@ -937,19 +955,32 @@ async function handleWebSocketUpgrade(
 
 export function http2ProxyPlugin(): Plugin {
   let config: ResolvedConfig;
+  let savedProxyConfig: Record<string, string | ProxyOptions> = {};
 
   return {
     name: "vite-plugin-http2-proxy",
+    enforce: "pre", // Run before other plugins
+
+    config(userConfig) {
+      // Intercept proxy config early and clear it to prevent Vite's HTTP/1.1 downgrade
+      if (userConfig.server?.proxy) {
+        savedProxyConfig = { ...userConfig.server.proxy };
+        userConfig.server.proxy = {};
+        console.log(
+          `[vite-plugin-http2-proxy] Intercepted proxy config for ${Object.keys(savedProxyConfig).length} routes`,
+        );
+      }
+    },
 
     configResolved(resolvedConfig) {
       config = resolvedConfig;
       logger = createLogger("vite:http2-proxy", config);
       connectionPool = new Http2ConnectionPool(logger);
 
-      // Extract queue options from proxy configurations
+      // Extract queue options from saved proxy configurations
       let queueOptions = {};
-      if (config.server.proxy) {
-        for (const proxyOpts of Object.values(config.server.proxy)) {
+      if (savedProxyConfig) {
+        for (const proxyOpts of Object.values(savedProxyConfig)) {
           const opts = normalizeProxyOptions(proxyOpts);
           if (opts.maxQueueSize || opts.queueTimeout) {
             queueOptions = {
@@ -965,24 +996,22 @@ export function http2ProxyPlugin(): Plugin {
     },
 
     configureServer(server) {
-      if (!server.config.server.proxy) {
+      if (Object.keys(savedProxyConfig).length === 0) {
         return;
       }
 
-      const proxies = server.config.server.proxy;
-
-      // Store the proxy config and then clear it to prevent Vite's built-in proxy from running
-      const proxyConfig = { ...proxies };
-      server.config.server.proxy = {};
-
       logger?.info(
-        `HTTP/2 proxy plugin taking over proxy configuration for ${Object.keys(proxyConfig).length} routes`,
+        `HTTP/2 proxy plugin setting up ${Object.keys(savedProxyConfig).length} proxy routes`,
       );
-      logger?.debug(`Proxy routes: ${Object.keys(proxyConfig).join(", ")}`);
+      logger?.debug(
+        `Proxy routes: ${Object.keys(savedProxyConfig).join(", ")}`,
+      );
 
       // Handle WebSocket upgrades
       server.httpServer?.on("upgrade", async (req, socket, head) => {
-        for (const [context, proxyOptions] of Object.entries(proxyConfig)) {
+        for (const [context, proxyOptions] of Object.entries(
+          savedProxyConfig,
+        )) {
           const opts = normalizeProxyOptions(proxyOptions);
 
           if (!opts.ws) continue;
@@ -1012,7 +1041,7 @@ export function http2ProxyPlugin(): Plugin {
       });
 
       // Process each proxy configuration
-      for (const [context, proxyOptions] of Object.entries(proxyConfig)) {
+      for (const [context, proxyOptions] of Object.entries(savedProxyConfig)) {
         const opts = normalizeProxyOptions(proxyOptions);
 
         // Create middleware for this proxy context
