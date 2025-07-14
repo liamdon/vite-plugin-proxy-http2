@@ -26,6 +26,32 @@ pnpm add vite-plugin-proxy-http2
 
 ## Quick Start
 
+### Recommended: Plugin-level Configuration (HTTP/2 by default)
+
+```typescript
+// vite.config.ts
+import { defineConfig } from 'vite'
+import http2ProxyPlugin from 'vite-plugin-proxy-http2'
+
+export default defineConfig({
+  plugins: [
+    http2ProxyPlugin({
+      proxy: {
+        '/api': 'https://api.example.com',
+        '/ws': {
+          target: 'wss://websocket.example.com',
+          ws: true
+        }
+      }
+    })
+  ]
+})
+```
+
+> **Note**: This approach ensures HTTP/2 is used by default and prevents Vite from downgrading to HTTP/1.1.
+
+### Alternative: Vite Server Configuration
+
 ```typescript
 // vite.config.ts
 import { defineConfig } from 'vite'
@@ -41,35 +67,38 @@ export default defineConfig({
 })
 ```
 
+> **Warning**: Using Vite's `server.proxy` may cause Vite to downgrade connections to HTTP/1.1. We recommend using the plugin-level configuration instead.
+
 ## Configuration
 
 ### Basic Examples
 
 ```typescript
 export default defineConfig({
-  plugins: [http2ProxyPlugin()],
-  server: {
-    proxy: {
-      // String shorthand
-      '/api': 'https://api.example.com',
-      
-      // With options
-      '/api': {
-        target: 'https://api.example.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
-        headers: {
-          'X-Custom-Header': 'value'
+  plugins: [
+    http2ProxyPlugin({
+      proxy: {
+        // String shorthand
+        '/api': 'https://api.example.com',
+        
+        // With options
+        '/api': {
+          target: 'https://api.example.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api/, ''),
+          headers: {
+            'X-Custom-Header': 'value'
+          }
+        },
+        
+        // RegExp pattern
+        '^/api/.*': {
+          target: 'https://api.example.com',
+          changeOrigin: true
         }
-      },
-      
-      // RegExp pattern
-      '^/api/.*': {
-        target: 'https://api.example.com',
-        changeOrigin: true
       }
-    }
-  }
+    })
+  ]
 })
 ```
 

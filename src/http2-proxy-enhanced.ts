@@ -373,6 +373,15 @@ async function proxyHttp1Request(
   const startTime = Date.now();
   logger?.debug(`Starting HTTP/1.1 proxy for ${req.method} ${req.url}`);
 
+  // Debug log headers for WebSocket
+  if (options.ws && logger) {
+    logger.debug(`HTTP/1.1 proxy headers for WebSocket request:`);
+    logger.debug(`  Upgrade: ${req.headers.upgrade}`);
+    logger.debug(`  Connection: ${req.headers.connection}`);
+    logger.debug(`  Sec-WebSocket-Key: ${req.headers["sec-websocket-key"]}`);
+    logger.debug(`  All headers: ${JSON.stringify(Object.keys(req.headers))}`);
+  }
+
   // Get target URL
   let targetBase: string;
   try {
@@ -417,12 +426,41 @@ async function proxyHttp1Request(
     ? await import("node:https")
     : await import("node:http");
 
+  // Filter out HTTP/2 pseudo-headers and connection-specific headers
+  const filteredHeaders: Record<string, string | string[]> = {};
+  const forbiddenHeaders = [
+    "keep-alive",
+    "transfer-encoding",
+    "proxy-connection",
+    "te",
+    "trailer",
+  ];
+
+  // For WebSocket requests, preserve upgrade and connection headers
+  const isWebSocketRequest =
+    options.ws || req.headers.upgrade?.toLowerCase() === "websocket";
+
+  if (!isWebSocketRequest) {
+    forbiddenHeaders.push("connection", "upgrade");
+  }
+
+  for (const [key, value] of Object.entries(req.headers)) {
+    // Skip HTTP/2 pseudo-headers (start with :)
+    if (key.startsWith(":")) continue;
+    // Skip forbidden headers
+    if (forbiddenHeaders.includes(key.toLowerCase())) continue;
+
+    if (value) {
+      filteredHeaders[key] = value;
+    }
+  }
+
   const proxyReqOptions = {
     hostname: targetUrl.hostname,
     port: Number(port),
     path: targetUrl.pathname + targetUrl.search,
     method: req.method,
-    headers: { ...req.headers },
+    headers: filteredHeaders,
     rejectUnauthorized: options.secure !== false,
   };
 
@@ -436,7 +474,9 @@ async function proxyHttp1Request(
   }
 
   if (options.xfwd) {
-    proxyReqOptions.headers["x-forwarded-for"] = req.socket.remoteAddress;
+    if (req.socket.remoteAddress) {
+      proxyReqOptions.headers["x-forwarded-for"] = req.socket.remoteAddress;
+    }
     proxyReqOptions.headers["x-forwarded-proto"] = isTLSSocket(req.socket)
       ? "https"
       : "http";
@@ -953,21 +993,41 @@ async function handleWebSocketUpgrade(
   });
 }
 
-export function http2ProxyPlugin(): Plugin {
+export interface Http2ProxyPluginOptions {
+  proxy?: Record<string, string | ProxyOptions>;
+}
+
+export function http2ProxyPlugin(
+  options: Http2ProxyPluginOptions = {},
+): Plugin {
   let config: ResolvedConfig;
   let savedProxyConfig: Record<string, string | ProxyOptions> = {};
+
+  // Use plugin options proxy config if provided
+  if (options.proxy) {
+    savedProxyConfig = { ...options.proxy };
+    console.log(
+      `[vite-plugin-http2-proxy] Using plugin proxy config for ${Object.keys(savedProxyConfig).length} routes`,
+    );
+  }
 
   return {
     name: "vite-plugin-http2-proxy",
     enforce: "pre", // Run before other plugins
 
     config(userConfig) {
-      // Intercept proxy config early and clear it to prevent Vite's HTTP/1.1 downgrade
-      if (userConfig.server?.proxy) {
+      // Only intercept Vite proxy config if we don't have plugin-level config
+      if (!options.proxy && userConfig.server?.proxy) {
         savedProxyConfig = { ...userConfig.server.proxy };
         userConfig.server.proxy = {};
         console.log(
-          `[vite-plugin-http2-proxy] Intercepted proxy config for ${Object.keys(savedProxyConfig).length} routes`,
+          `[vite-plugin-http2-proxy] Intercepted Vite proxy config for ${Object.keys(savedProxyConfig).length} routes`,
+        );
+      } else if (userConfig.server?.proxy) {
+        // Clear Vite's proxy config to prevent HTTP/1.1 downgrade
+        userConfig.server.proxy = {};
+        console.log(
+          `[vite-plugin-http2-proxy] Cleared Vite proxy config to prevent HTTP/1.1 downgrade`,
         );
       }
     },
