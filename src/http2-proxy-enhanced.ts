@@ -12,6 +12,7 @@ import * as tls from "node:tls";
 import type { Plugin, ProxyOptions, ResolvedConfig } from "vite";
 import { Http2ConnectionPool } from "./connection-pool";
 import { createLogger, type Logger, logProxyRequest } from "./logger";
+import { RequestQueue } from "./request-queue";
 
 let logger: Logger;
 
@@ -55,6 +56,10 @@ interface Http2ProxyOptions extends Omit<ProxyOptions, "configure" | "bypass"> {
   timeout?: number;
   proxyTimeout?: number;
 
+  // Request queue options
+  maxQueueSize?: number;
+  queueTimeout?: number;
+
   // Override configure with HTTP/2 stream type
   configure?: (stream: ClientHttp2Stream, options: Http2ProxyOptions) => void;
 
@@ -80,6 +85,7 @@ interface NormalizedProxyOptions extends Http2ProxyOptions {
 }
 
 let connectionPool: Http2ConnectionPool;
+let requestQueue: RequestQueue;
 
 function normalizeProxyOptions(
   options: string | Http2ProxyOptions | ProxyOptions,
@@ -361,14 +367,57 @@ async function proxyHttp2Request(
   }
 
   const origin = `${targetUrl.protocol}//${targetUrl.host}`;
-  let session: ClientHttp2Session;
-  try {
-    session = connectionPool.getSession(origin, options);
-  } catch (err) {
-    logger?.error(`Failed to get HTTP/2 session for ${origin}`, err);
-    res.statusCode = 502;
-    res.end("Bad Gateway: Failed to establish HTTP/2 connection");
-    return;
+
+  // Helper function to actually create and handle the stream
+  const createAndHandleStream = () => {
+    const session = connectionPool.getAvailableSession(origin, options);
+    if (!session) {
+      // No available session capacity, queue the request
+      const queued = requestQueue.enqueue(origin, req, res, () => {
+        processProxiedRequest(req, res, options, targetUrl, origin, startTime);
+      });
+
+      if (!queued) {
+        res.statusCode = 503;
+        res.end("Service Unavailable: Request queue full");
+      }
+      return;
+    }
+
+    processProxiedRequest(
+      req,
+      res,
+      options,
+      targetUrl,
+      origin,
+      startTime,
+      session,
+    );
+  };
+
+  createAndHandleStream();
+}
+
+// Separate function to process the proxied request
+function processProxiedRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: NormalizedProxyOptions,
+  targetUrl: URL,
+  origin: string,
+  startTime: number,
+  session?: ClientHttp2Session,
+): void {
+  if (!session) {
+    // Try to get a session again (for queued requests)
+    try {
+      session = connectionPool.getSession(origin, options);
+    } catch (err) {
+      logger?.error(`Failed to get HTTP/2 session for ${origin}`, err);
+      res.statusCode = 502;
+      res.end("Bad Gateway: Failed to establish HTTP/2 connection");
+      return;
+    }
   }
 
   const headers = createHttp2Headers(req, targetUrl, options);
@@ -377,12 +426,34 @@ async function proxyHttp2Request(
   // Set timeout if specified
   const timeout = options.proxyTimeout || options.timeout || 120000;
 
+  // Track stream creation
+  connectionPool.incrementActiveStreams(origin);
+
   let stream: ClientHttp2Stream;
   try {
     stream = session.request(headers, {
       endStream: req.method === "GET" || req.method === "HEAD",
     });
   } catch (err) {
+    connectionPool.decrementActiveStreams(origin);
+
+    // Check if this is a stream limit error
+    if (
+      err instanceof Error &&
+      err.message?.includes("ERR_HTTP2_OUT_OF_STREAMS")
+    ) {
+      // Queue the request
+      const queued = requestQueue.enqueue(origin, req, res, () => {
+        processProxiedRequest(req, res, options, targetUrl, origin, startTime);
+      });
+
+      if (!queued) {
+        res.statusCode = 503;
+        res.end("Service Unavailable: Request queue full");
+      }
+      return;
+    }
+
     logger?.error(`Failed to create HTTP/2 stream for ${origin}`, err);
     res.statusCode = 502;
     res.end("Bad Gateway: Failed to create HTTP/2 stream");
@@ -414,6 +485,15 @@ async function proxyHttp2Request(
     if (!res.headersSent) {
       res.writeHead(502, { "Content-Type": "text/plain" });
       res.end("Bad Gateway");
+    }
+
+    // Decrement active streams on error
+    connectionPool.decrementActiveStreams(origin);
+
+    // Process next queued request if any
+    const nextRequest = requestQueue.dequeue(origin);
+    if (nextRequest) {
+      nextRequest.callback();
     }
   });
 
@@ -494,6 +574,16 @@ async function proxyHttp2Request(
 
   stream.on("close", () => {
     clearTimeout(timeoutHandle);
+
+    // Decrement active streams and process queued requests
+    connectionPool.decrementActiveStreams(origin);
+
+    // Process next queued request if any
+    const nextRequest = requestQueue.dequeue(origin);
+    if (nextRequest) {
+      // Process the queued request
+      nextRequest.callback();
+    }
   });
 
   // Forward request body if present
@@ -608,6 +698,23 @@ export function http2ProxyPlugin(): Plugin {
       config = resolvedConfig;
       logger = createLogger("vite:http2-proxy", config);
       connectionPool = new Http2ConnectionPool(logger);
+
+      // Extract queue options from proxy configurations
+      let queueOptions = {};
+      if (config.server.proxy) {
+        for (const proxyOpts of Object.values(config.server.proxy)) {
+          const opts = normalizeProxyOptions(proxyOpts);
+          if (opts.maxQueueSize || opts.queueTimeout) {
+            queueOptions = {
+              maxQueueSize: opts.maxQueueSize,
+              queueTimeout: opts.queueTimeout,
+            };
+            break;
+          }
+        }
+      }
+
+      requestQueue = new RequestQueue(logger, queueOptions);
     },
 
     configureServer(server) {
@@ -687,12 +794,14 @@ export function http2ProxyPlugin(): Plugin {
       // Clean up HTTP/2 sessions when dev server closes
       server.httpServer?.on("close", () => {
         logger?.info("Dev server closing, cleaning up HTTP/2 sessions");
+        requestQueue.clear();
         connectionPool.close();
       });
 
       // Also handle SIGINT/SIGTERM for graceful shutdown
       const cleanup = () => {
         logger?.info("Received shutdown signal, cleaning up HTTP/2 sessions");
+        requestQueue.clear();
         connectionPool.close();
       };
 
@@ -701,7 +810,8 @@ export function http2ProxyPlugin(): Plugin {
     },
 
     buildEnd() {
-      // Clean up HTTP/2 sessions
+      // Clean up HTTP/2 sessions and request queue
+      requestQueue.clear();
       connectionPool.close();
     },
   };

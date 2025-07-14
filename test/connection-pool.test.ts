@@ -70,9 +70,9 @@ describe("Http2ConnectionPool", () => {
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => {
-      targetServer.close(resolve);
-    });
+    targetServer.close();
+    // Give OS time to release the port
+    await new Promise((resolve) => setTimeout(resolve, 100));
   });
 
   it("should create new sessions for different origins", () => {

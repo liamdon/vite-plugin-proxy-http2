@@ -12,6 +12,8 @@ export interface Http2Session {
   session: ClientHttp2Session;
   origin: string;
   lastUsed: number;
+  activeStreams: number;
+  maxConcurrentStreams: number;
 }
 
 export class Http2ConnectionPool {
@@ -63,10 +65,27 @@ export class Http2ConnectionPool {
       throw new Error(`HTTP/2 connection timeout for ${origin}`);
     }, 10000); // 10 second timeout for connection
 
+    // Default max concurrent streams - will be updated by remoteSettings
+    let maxConcurrentStreams = 100;
+
     // Wait for connection to be established
     session.once("connect", () => {
       clearTimeout(connectionTimeout);
       this.logger?.debug(`HTTP/2 session connected to ${origin}`);
+    });
+
+    // Listen for remote settings to get actual max concurrent streams
+    session.on("remoteSettings", (settings) => {
+      if (settings.maxConcurrentStreams !== undefined) {
+        maxConcurrentStreams = settings.maxConcurrentStreams;
+        const sessionData = this.sessions.get(origin);
+        if (sessionData) {
+          sessionData.maxConcurrentStreams = maxConcurrentStreams;
+        }
+        this.logger?.debug(
+          `HTTP/2 session ${origin} maxConcurrentStreams: ${maxConcurrentStreams}`,
+        );
+      }
     });
 
     session.on("error", (err) => {
@@ -90,12 +109,65 @@ export class Http2ConnectionPool {
       session,
       origin,
       lastUsed: Date.now(),
+      activeStreams: 0,
+      maxConcurrentStreams,
     });
 
     // Cleanup old sessions periodically
     this.cleanup();
 
     return session;
+  }
+
+  canAcceptStream(origin: string): boolean {
+    const sess = this.sessions.get(origin);
+    if (!sess || sess.session.closed || sess.session.destroyed) {
+      return false;
+    }
+    return sess.activeStreams < sess.maxConcurrentStreams;
+  }
+
+  incrementActiveStreams(origin: string): void {
+    const sess = this.sessions.get(origin);
+    if (sess) {
+      sess.activeStreams++;
+      this.logger?.debug(
+        `Session ${origin} active streams: ${sess.activeStreams}/${sess.maxConcurrentStreams}`,
+      );
+    }
+  }
+
+  decrementActiveStreams(origin: string): void {
+    const sess = this.sessions.get(origin);
+    if (sess && sess.activeStreams > 0) {
+      sess.activeStreams--;
+      this.logger?.debug(
+        `Session ${origin} active streams: ${sess.activeStreams}/${sess.maxConcurrentStreams}`,
+      );
+    }
+  }
+
+  getAvailableSession(
+    origin: string,
+    options: ConnectionPoolOptions,
+  ): ClientHttp2Session | null {
+    const existing = this.sessions.get(origin);
+
+    // If we have an existing session that can accept streams, use it
+    if (existing && !existing.session.closed && !existing.session.destroyed) {
+      if (existing.activeStreams < existing.maxConcurrentStreams) {
+        existing.lastUsed = Date.now();
+        return existing.session;
+      }
+    }
+
+    // If we can create a new session (haven't hit maxSessions), do so
+    if (this.sessions.size < this.maxSessions || !existing) {
+      return this.getSession(origin, options);
+    }
+
+    // No available capacity
+    return null;
   }
 
   private evictOldest() {
