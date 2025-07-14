@@ -123,6 +123,21 @@ export default defineConfig({
 }
 ```
 
+#### Protocol Support (HTTP/1.1 and HTTP/2)
+```typescript
+// Force HTTP/1.1 for servers that don't support HTTP/2
+'/legacy-api': {
+  target: 'https://old-server.com',
+  forceHttp1: true
+}
+
+// Automatically detect protocol support
+'/auto': {
+  target: 'https://api.example.com',
+  autoDetectProtocol: true // Will use HTTP/2 if supported, fallback to HTTP/1.1
+}
+```
+
 #### Security Options
 ```typescript
 '/api': {
@@ -172,6 +187,8 @@ export default defineConfig({
 | `secure` | `boolean` | `true` | Verify SSL certificates |
 | `auth` | `string` | - | Basic authentication credentials |
 | `headers` | `object` | - | Custom headers to add to requests |
+| `forceHttp1` | `boolean` | `false` | Force HTTP/1.1 protocol for this proxy |
+| `autoDetectProtocol` | `boolean` | `false` | Auto-detect if origin supports HTTP/2 |
 | `xfwd` | `boolean` | `true` | Add X-Forwarded-* headers |
 | `preserveHeaderKeyCase` | `boolean` | `false` | Preserve original header key casing |
 | `cookieDomainRewrite` | `string \| object` | - | Rewrite cookie domains |

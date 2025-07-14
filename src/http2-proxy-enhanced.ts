@@ -5,7 +5,7 @@ import type {
   IncomingHttpHeaders,
   OutgoingHttpHeaders,
 } from "node:http2";
-import { constants } from "node:http2";
+import { connect, constants } from "node:http2";
 import * as net from "node:net";
 import type { TLSSocket } from "node:tls";
 import * as tls from "node:tls";
@@ -77,6 +77,10 @@ interface Http2ProxyOptions extends Omit<ProxyOptions, "configure" | "bypass"> {
 
   // SSE support
   sse?: boolean;
+
+  // Protocol options
+  forceHttp1?: boolean; // Force HTTP/1.1 for this proxy
+  autoDetectProtocol?: boolean; // Auto-detect server protocol support
 }
 
 interface NormalizedProxyOptions extends Http2ProxyOptions {
@@ -86,6 +90,48 @@ interface NormalizedProxyOptions extends Http2ProxyOptions {
 
 let connectionPool: Http2ConnectionPool;
 let requestQueue: RequestQueue;
+
+// Map to track which origins support HTTP/2
+const http2SupportMap = new Map<string, boolean>();
+
+// Check if an origin supports HTTP/2
+async function supportsHttp2(
+  origin: string,
+  secure: boolean,
+): Promise<boolean> {
+  // Check cache first
+  if (http2SupportMap.has(origin)) {
+    return http2SupportMap.get(origin) ?? false;
+  }
+
+  return new Promise((resolve) => {
+    const testSession = connect(origin, {
+      rejectUnauthorized: secure !== false,
+    });
+
+    const timeout = setTimeout(() => {
+      testSession.close();
+      // Timeout likely means HTTP/1.1 only
+      http2SupportMap.set(origin, false);
+      resolve(false);
+    }, 2000);
+
+    testSession.on("connect", () => {
+      clearTimeout(timeout);
+      testSession.close();
+      // Successful connection means HTTP/2 is supported
+      http2SupportMap.set(origin, true);
+      resolve(true);
+    });
+
+    testSession.on("error", () => {
+      clearTimeout(timeout);
+      // Error likely means HTTP/1.1 only
+      http2SupportMap.set(origin, false);
+      resolve(false);
+    });
+  });
+}
 
 function normalizeProxyOptions(
   options: string | Http2ProxyOptions | ProxyOptions,
@@ -317,6 +363,169 @@ async function handleBypass(
   return false;
 }
 
+// HTTP/1.1 proxy handler for WebSocket and other HTTP/1.1 requests
+async function proxyHttp1Request(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: NormalizedProxyOptions,
+  _next: () => void,
+): Promise<void> {
+  const startTime = Date.now();
+  logger?.debug(`Starting HTTP/1.1 proxy for ${req.method} ${req.url}`);
+
+  // Get target URL
+  let targetBase: string;
+  try {
+    targetBase = await getTargetUrl(req, options);
+  } catch (err) {
+    logger?.error("Failed to get target URL for HTTP/1.1 request", err);
+    res.statusCode = 500;
+    res.end("Internal Server Error: Invalid proxy target");
+    return;
+  }
+
+  if (!req.url) {
+    res.statusCode = 400;
+    res.end("Bad Request: Missing URL");
+    return;
+  }
+
+  let targetUrl: URL;
+  try {
+    targetUrl = new URL(req.url, targetBase);
+  } catch (err) {
+    logger?.error(
+      `Invalid URL construction: ${req.url} with base ${targetBase}`,
+      err,
+    );
+    res.statusCode = 400;
+    res.end("Bad Request: Invalid URL");
+    return;
+  }
+
+  // Apply path rewrite if provided
+  if (options.rewrite) {
+    const rewritten = options.rewrite(targetUrl.pathname);
+    targetUrl.pathname = rewritten;
+  }
+
+  const isSecure = targetUrl.protocol === "https:";
+  const port = targetUrl.port || (isSecure ? 443 : 80);
+
+  // Create HTTP/1.1 connection
+  const http = isSecure
+    ? await import("node:https")
+    : await import("node:http");
+
+  const proxyReqOptions = {
+    hostname: targetUrl.hostname,
+    port: Number(port),
+    path: targetUrl.pathname + targetUrl.search,
+    method: req.method,
+    headers: { ...req.headers },
+    rejectUnauthorized: options.secure !== false,
+  };
+
+  // Update headers
+  if (options.changeOrigin) {
+    proxyReqOptions.headers.host = targetUrl.host;
+  }
+
+  if (options.headers) {
+    Object.assign(proxyReqOptions.headers, options.headers);
+  }
+
+  if (options.xfwd) {
+    proxyReqOptions.headers["x-forwarded-for"] = req.socket.remoteAddress;
+    proxyReqOptions.headers["x-forwarded-proto"] = isTLSSocket(req.socket)
+      ? "https"
+      : "http";
+    proxyReqOptions.headers["x-forwarded-host"] = req.headers.host || "";
+    proxyReqOptions.headers["x-forwarded-port"] = String(req.socket.localPort);
+  }
+
+  if (options.auth && !proxyReqOptions.headers.authorization) {
+    const authString = Buffer.from(options.auth).toString("base64");
+    proxyReqOptions.headers.authorization = `Basic ${authString}`;
+  }
+
+  const proxyReq = http.request(proxyReqOptions, (proxyRes) => {
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+
+    logProxyRequest(
+      logger,
+      req.method || "GET",
+      req.url || "",
+      targetUrl.href,
+      proxyRes.statusCode || 0,
+      duration,
+    );
+
+    // Handle cookie rewriting
+    if (options.cookieDomainRewrite || options.cookiePathRewrite) {
+      const setCookieHeader = proxyRes.headers["set-cookie"];
+      if (setCookieHeader) {
+        const cookies = Array.isArray(setCookieHeader)
+          ? setCookieHeader
+          : [setCookieHeader];
+        proxyRes.headers["set-cookie"] = cookies.map((cookie) =>
+          rewriteCookie(
+            String(cookie),
+            options.cookieDomainRewrite || false,
+            options.cookiePathRewrite || false,
+          ),
+        );
+      }
+    }
+
+    // Copy status and headers
+    res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+
+    // Pipe the response
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on("error", (err) => {
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+
+    logger?.error(`HTTP/1.1 proxy error: ${err.message}`, err);
+    logProxyRequest(
+      logger,
+      req.method || "GET",
+      req.url || "",
+      targetUrl.href,
+      502,
+      duration,
+    );
+
+    if (!res.headersSent) {
+      res.writeHead(502, { "Content-Type": "text/plain" });
+      res.end("Bad Gateway");
+    }
+  });
+
+  // Handle timeout
+  if (options.timeout || options.proxyTimeout) {
+    const timeout = options.proxyTimeout || options.timeout || 120000;
+    proxyReq.setTimeout(timeout, () => {
+      proxyReq.destroy();
+      if (!res.headersSent) {
+        res.writeHead(504, { "Content-Type": "text/plain" });
+        res.end("Gateway Timeout");
+      }
+    });
+  }
+
+  // Forward request body if present
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    req.pipe(proxyReq);
+  } else {
+    proxyReq.end();
+  }
+}
+
 async function proxyHttp2Request(
   req: IncomingMessage,
   res: ServerResponse,
@@ -330,6 +539,20 @@ async function proxyHttp2Request(
     return;
   }
 
+  // Check if this is a WebSocket upgrade request
+  // Note: Some WebSocket clients first send a POST request before upgrading
+  const isWebSocketRequest =
+    req.headers.upgrade?.toLowerCase() === "websocket" ||
+    (req.headers.connection?.toLowerCase().includes("upgrade") &&
+      req.headers["sec-websocket-key"]) ||
+    req.headers["sec-websocket-version"];
+
+  if (isWebSocketRequest && options.ws) {
+    // Handle WebSocket requests with HTTP/1.1
+    logger?.info(`Handling WebSocket request to ${req.url} using HTTP/1.1`);
+    return proxyHttp1Request(req, res, options, next);
+  }
+
   // Get target URL (may be dynamic via router)
   let targetBase: string;
   try {
@@ -339,6 +562,30 @@ async function proxyHttp2Request(
     res.statusCode = 500;
     res.end("Internal Server Error: Invalid proxy target");
     return;
+  }
+
+  // Check if we should force HTTP/1.1 or auto-detect
+  if (options.forceHttp1) {
+    logger?.info(`Using HTTP/1.1 for ${req.url} (forceHttp1 enabled)`);
+    return proxyHttp1Request(req, res, options, next);
+  }
+
+  if (options.autoDetectProtocol) {
+    const targetUrl = new URL(targetBase);
+    const origin = `${targetUrl.protocol}//${targetUrl.host}`;
+    const useHttp2 = await supportsHttp2(origin, options.secure !== false);
+
+    if (!useHttp2) {
+      logger?.info(
+        `Using HTTP/1.1 for ${req.url} - origin ${origin} does not support HTTP/2`,
+      );
+      return proxyHttp1Request(req, res, options, next);
+    }
+    logger?.debug(
+      `Using HTTP/2 for ${req.url} - origin ${origin} supports HTTP/2`,
+    );
+  } else {
+    logger?.debug(`Using HTTP/2 for ${req.url} (default protocol)`);
   }
 
   if (!req.url) {
@@ -724,9 +971,18 @@ export function http2ProxyPlugin(): Plugin {
 
       const proxies = server.config.server.proxy;
 
+      // Store the proxy config and then clear it to prevent Vite's built-in proxy from running
+      const proxyConfig = { ...proxies };
+      server.config.server.proxy = {};
+
+      logger?.info(
+        `HTTP/2 proxy plugin taking over proxy configuration for ${Object.keys(proxyConfig).length} routes`,
+      );
+      logger?.debug(`Proxy routes: ${Object.keys(proxyConfig).join(", ")}`);
+
       // Handle WebSocket upgrades
       server.httpServer?.on("upgrade", async (req, socket, head) => {
-        for (const [context, proxyOptions] of Object.entries(proxies)) {
+        for (const [context, proxyOptions] of Object.entries(proxyConfig)) {
           const opts = normalizeProxyOptions(proxyOptions);
 
           if (!opts.ws) continue;
@@ -756,7 +1012,7 @@ export function http2ProxyPlugin(): Plugin {
       });
 
       // Process each proxy configuration
-      for (const [context, proxyOptions] of Object.entries(proxies)) {
+      for (const [context, proxyOptions] of Object.entries(proxyConfig)) {
         const opts = normalizeProxyOptions(proxyOptions);
 
         // Create middleware for this proxy context
@@ -796,6 +1052,7 @@ export function http2ProxyPlugin(): Plugin {
         logger?.info("Dev server closing, cleaning up HTTP/2 sessions");
         requestQueue.clear();
         connectionPool.close();
+        http2SupportMap.clear();
       });
 
       // Also handle SIGINT/SIGTERM for graceful shutdown
@@ -803,6 +1060,7 @@ export function http2ProxyPlugin(): Plugin {
         logger?.info("Received shutdown signal, cleaning up HTTP/2 sessions");
         requestQueue.clear();
         connectionPool.close();
+        http2SupportMap.clear();
       };
 
       process.once("SIGINT", cleanup);
@@ -813,6 +1071,8 @@ export function http2ProxyPlugin(): Plugin {
       // Clean up HTTP/2 sessions and request queue
       requestQueue.clear();
       connectionPool.close();
+      // Clear protocol detection cache
+      http2SupportMap.clear();
     },
   };
 }
