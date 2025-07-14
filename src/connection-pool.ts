@@ -8,6 +8,12 @@ export interface ConnectionPoolOptions {
   auth?: string;
 }
 
+export interface Http2ConnectionPoolConfig {
+  maxSessions?: number;
+  sessionMaxAge?: number;
+  connectionTimeout?: number;
+}
+
 export interface Http2Session {
   session: ClientHttp2Session;
   origin: string;
@@ -18,12 +24,16 @@ export interface Http2Session {
 
 export class Http2ConnectionPool {
   private sessions: Map<string, Http2Session> = new Map();
-  private maxAge = 5 * 60 * 1000; // 5 minutes
-  private maxSessions = 100;
+  private maxAge: number;
+  private maxSessions: number;
+  private connectionTimeout: number;
   private logger?: Logger;
 
-  constructor(logger?: Logger) {
+  constructor(logger?: Logger, config: Http2ConnectionPoolConfig = {}) {
     this.logger = logger;
+    this.maxSessions = config.maxSessions ?? 256;
+    this.maxAge = config.sessionMaxAge ?? 5 * 60 * 1000; // 5 minutes default
+    this.connectionTimeout = config.connectionTimeout ?? 10000; // 10 seconds default
   }
 
   getSession(
@@ -63,7 +73,7 @@ export class Http2ConnectionPool {
     const connectionTimeout = setTimeout(() => {
       session.close();
       throw new Error(`HTTP/2 connection timeout for ${origin}`);
-    }, 10000); // 10 second timeout for connection
+    }, this.connectionTimeout);
 
     // Default max concurrent streams - will be updated by remoteSettings
     let maxConcurrentStreams = 100;

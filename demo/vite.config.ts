@@ -150,32 +150,34 @@ function demoSetupPlugin() {
 }
 
 export default defineConfig({
-  plugins: [demoSetupPlugin(), http2ProxyPlugin()],
+  plugins: [
+    demoSetupPlugin(),
+    http2ProxyPlugin({
+      // Global settings that apply to all proxies
+      maxSessions: 50, // Limit HTTP/2 sessions
+      sessionMaxAge: 2 * 60 * 1000, // 2 minute session timeout
+      connectionTimeout: 5000, // 5 second connection timeout
+      maxQueueSize: 200, // Allow up to 200 queued requests
+      queueTimeout: 15000, // 15 second queue timeout
+      defaultTimeout: 30000, // 30 second default timeout for all proxies
+
+      // Proxy configuration can be here or in server.proxy
+      proxy: {
+        // Proxy all /api requests to our HTTP/2 test server
+        "/api": {
+          target: "https://localhost:9443",
+          changeOrigin: true,
+          secure: false, // Allow self-signed certificates for demo
+          rewrite: (path) => path, // Keep the path as-is
+          // This specific proxy can override global timeout
+          timeout: 60000, // 60 seconds for this specific route
+        },
+      },
+    }),
+  ],
   root: __dirname,
   server: {
     port: 5173,
     open: true,
-    proxy: {
-      // Proxy all /api requests to our HTTP/2 test server
-      "/api": {
-        target: "https://localhost:9443",
-        changeOrigin: true,
-        secure: false, // Allow self-signed certificates for demo
-        rewrite: (path) => path, // Keep the path as-is
-        configure: (proxy, options) => {
-          // Additional logging for demo purposes
-          proxy.on("proxyReq", (_proxyReq, req) => {
-            console.log(
-              `[Proxy] ${req.method} ${req.url} -> ${options.target}${req.url}`,
-            );
-          });
-          proxy.on("proxyRes", (proxyRes, req) => {
-            console.log(
-              `[Proxy] Response ${proxyRes.statusCode} for ${req.url}`,
-            );
-          });
-        },
-      },
-    },
   },
 });
