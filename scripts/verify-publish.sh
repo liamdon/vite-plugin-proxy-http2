@@ -32,7 +32,7 @@ echo "✅ Build successful"
 # Run tests
 echo ""
 echo "🧪 Running tests..."
-pnpm run test:run
+pnpm run test
 if [ $? -ne 0 ]; then
     echo "❌ Tests failed!"
     exit 1
