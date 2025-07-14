@@ -1128,13 +1128,13 @@ export function http2ProxyPlugin(
             logger?.info(
               `WebSocket upgrade matched route ${context} for ${req.url}`,
             );
-            
+
             // Handle the WebSocket upgrade without blocking the event loop
             handleWebSocketUpgrade(req, socket, head, opts).catch((err) => {
               logger?.error(`WebSocket proxy error for ${req.url}:`, err);
               socket.destroy();
             });
-            
+
             break;
           }
         }
