@@ -1,5 +1,7 @@
 # Vite HTTP/2 Proxy Plugin
 
+[![CI](https://github.com/liamdon/vite-plugin-proxy-http2/actions/workflows/main.yml/badge.svg)](https://github.com/liamdon/vite-plugin-proxy-http2/actions/workflows/main.yml)
+
 Vite plugin that provides HTTP/2 proxy support with full feature parity to Vite's built-in proxy.
 
 ## Features
