@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-proxy-http2",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Vite plugin for HTTP/2 proxy support with proper protocol handling",
   "main": "dist/index.js",
