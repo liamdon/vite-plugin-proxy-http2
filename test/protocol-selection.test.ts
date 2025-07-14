@@ -58,7 +58,9 @@ describe("Protocol Selection", () => {
   it("should intercept proxy config early", () => {
     // Check that our plugin intercepted the proxy config
     const interceptLogs = consoleSpy.mock.calls.filter((call) =>
-      call[0]?.includes("[vite-plugin-http2-proxy] Intercepted proxy config"),
+      call[0]?.includes(
+        "[vite-plugin-http2-proxy] Intercepted Vite proxy config",
+      ),
     );
     expect(interceptLogs.length).toBeGreaterThan(0);
     expect(interceptLogs[0][0]).toContain("4 routes");
