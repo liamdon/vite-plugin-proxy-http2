@@ -19,7 +19,7 @@
     "lint": "pnpm exec biome check",
     "lint:fix": "pnpm exec biome check --write",
     "check": "pnpm run lint && pnpm build && pnpm run test",
-    "prepublishOnly": "npm run build && npm run test:run",
+    "prepublishOnly": "npm run check",
     "typecheck": "tsc --noEmit",
     "verify": "./scripts/verify-publish.sh"
   },
