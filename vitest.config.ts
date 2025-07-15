@@ -6,5 +6,12 @@ export default defineConfig({
     environment: "node",
     testTimeout: 30000,
     setupFiles: ["./test/setup.ts"],
+    // Run tests sequentially to avoid port conflicts with WebSocket servers
+    pool: "forks",
+    poolOptions: {
+      forks: {
+        singleFork: true,
+      },
+    },
   },
 });
