@@ -91,7 +91,7 @@ describe("WebSocket Proxy", () => {
   });
 
   it("should handle WebSocket with forceHttp1 option", async () => {
-    // Create a new Vite server with forceHttp1
+    // Create a second server with forceHttp1
     const server2 = await createServer({
       plugins: [http2ProxyPlugin()],
       server: {

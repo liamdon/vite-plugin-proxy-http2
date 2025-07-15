@@ -90,6 +90,19 @@ let requestQueue: RequestQueue;
 // Map to track which origins support HTTP/2
 const http2SupportMap = new Map<string, boolean>();
 
+// Cache compiled regular expressions to avoid recompiling on every request
+const regexpCache = new Map<string, RegExp>();
+
+// Get or create a cached regular expression
+function getCachedRegExp(pattern: string): RegExp {
+  let regexp = regexpCache.get(pattern);
+  if (!regexp) {
+    regexp = new RegExp(pattern);
+    regexpCache.set(pattern, regexp);
+  }
+  return regexp;
+}
+
 // Check if an origin supports HTTP/2
 async function supportsHttp2(
   origin: string,
@@ -914,35 +927,47 @@ async function handleWebSocketUpgrade(
   const socketId = `${req.socket.remoteAddress}:${req.socket.remotePort}`;
   logger?.debug(`[WS ${socketId}] Starting WebSocket upgrade for ${req.url}`);
 
-  let targetBase: string;
-  try {
-    targetBase = await getTargetUrl(req, options);
-  } catch (err) {
-    logger?.error(
-      `[WS ${socketId}] Failed to get target URL for WebSocket`,
-      err,
-    );
-    socket.end("HTTP/1.1 500 Internal Server Error\r\n\r\n");
-    return;
-  }
+  // Get target URL asynchronously without blocking
+  getTargetUrl(req, options)
+    .then((targetBase) => {
+      if (!req.url) {
+        socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+        return;
+      }
 
-  if (!req.url) {
-    socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
-    return;
-  }
+      let targetUrl: URL;
+      try {
+        targetUrl = new URL(req.url, targetBase);
+      } catch (err) {
+        logger?.error(
+          `Invalid WebSocket URL: ${req.url} with base ${targetBase}`,
+          err,
+        );
+        socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+        return;
+      }
 
-  let targetUrl: URL;
-  try {
-    targetUrl = new URL(req.url, targetBase);
-  } catch (err) {
-    logger?.error(
-      `Invalid WebSocket URL: ${req.url} with base ${targetBase}`,
-      err,
-    );
-    socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
-    return;
-  }
+      // Continue with the WebSocket upgrade
+      performWebSocketUpgrade(req, socket, head, options, targetUrl, socketId);
+    })
+    .catch((err) => {
+      logger?.error(
+        `[WS ${socketId}] Failed to get target URL for WebSocket`,
+        err,
+      );
+      socket.end("HTTP/1.1 500 Internal Server Error\r\n\r\n");
+    });
+}
 
+// Separate function to perform the actual WebSocket upgrade
+function performWebSocketUpgrade(
+  req: IncomingMessage,
+  socket: net.Socket,
+  head: Buffer,
+  options: NormalizedProxyOptions,
+  targetUrl: URL,
+  socketId: string,
+): void {
   const isSecure =
     targetUrl.protocol === "https:" || targetUrl.protocol === "wss:";
   const port = targetUrl.port || (isSecure ? 443 : 80);
@@ -958,20 +983,27 @@ async function handleWebSocketUpgrade(
         host: targetUrl.hostname,
       });
 
-  // Build WebSocket upgrade request
-  const headers = [
-    `GET ${targetUrl.pathname}${targetUrl.search} HTTP/1.1`,
-    `Host: ${targetUrl.host}`,
-  ];
+  // Build WebSocket upgrade request more efficiently
+  // Pre-calculate header count to avoid array resizing
+  const headerEntries = Object.entries(req.headers);
+  const headerCount = headerEntries.length + 3; // +3 for GET, Host, and empty lines
+  const headers = new Array(headerCount);
 
-  // Forward original headers
-  for (const [key, value] of Object.entries(req.headers)) {
+  // Add required headers
+  headers[0] = `GET ${targetUrl.pathname}${targetUrl.search} HTTP/1.1`;
+  headers[1] = `Host: ${targetUrl.host}`;
+
+  // Forward original headers (skip host)
+  let headerIndex = 2;
+  for (const [key, value] of headerEntries) {
     if (key.toLowerCase() !== "host") {
-      headers.push(`${key}: ${value}`);
+      headers[headerIndex++] = `${key}: ${value}`;
     }
   }
 
-  headers.push("", ""); // Empty line to end headers
+  // Add empty lines to end headers
+  headers[headerIndex++] = "";
+  headers[headerIndex] = "";
 
   proxySocket.on("connect", () => {
     logger?.debug(`[WS ${socketId}] Connected to target ${targetUrl.host}`);
@@ -1116,8 +1148,8 @@ export function http2ProxyPlugin(
 
           // Check if request matches the context
           if (context.startsWith("^")) {
-            // RegExp pattern
-            const pattern = new RegExp(context);
+            // RegExp pattern - use cached version
+            const pattern = getCachedRegExp(context);
             shouldProxy = req.url ? pattern.test(req.url) : false;
           } else {
             // String prefix
@@ -1147,7 +1179,7 @@ export function http2ProxyPlugin(
             return (
               normalized.ws &&
               (context.startsWith("^")
-                ? new RegExp(context).test(req.url)
+                ? getCachedRegExp(context).test(req.url)
                 : req.url.startsWith(context))
             );
           },
@@ -1172,8 +1204,8 @@ export function http2ProxyPlugin(
 
           // Check if request matches the context
           if (context.startsWith("^")) {
-            // RegExp pattern
-            const pattern = new RegExp(context);
+            // RegExp pattern - use cached version
+            const pattern = getCachedRegExp(context);
             shouldProxy = pattern.test(req.url);
           } else {
             // String prefix
